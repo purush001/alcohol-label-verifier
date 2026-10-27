@@ -1,0 +1,317 @@
+<title>Alcohol Label Verifier</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Checks an alcohol beverage label image against its application data: brand, class/type, alcohol content, net contents, bottler, origin and the government health warning.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a two-column review desk — evidence (label + application) on the left, findings on the right; stacks on phones. */
+:root {
+  --bg: #f3f4f7;
+  --surface: #ffffff;
+  --sunk: #e9ecf2;
+  --line: #cfd5e0;
+  --fg: #141b2a;
+  --muted: #535d71;
+  --accent: #1f3f7a;
+  --accent-ink: #ffffff;
+  --accent-soft: #e3e9f6;
+  --pass: #17663a;  --pass-bg: #e1f2e7;
+  --review: #8a4b00; --review-bg: #fcefd9;
+  --fail: #a3221a;  --fail-bg: #fbe4e1;
+  --skip: #5c6577;  --skip-bg: #eceef2;
+  --focus: #2f6bdc;
+  --font-ui: "Public Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-display: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f131b; --surface: #171d28; --sunk: #111621; --line: #2c3546; --fg: #e8ebf1; --muted: #a2abbd;
+    --accent: #9db8f5; --accent-ink: #0f1626; --accent-soft: #1d2840;
+    --pass: #7fd6a0; --pass-bg: #15301f; --review: #f2bf6c; --review-bg: #33260f;
+    --fail: #ff9b90; --fail-bg: #3a1916; --skip: #a2abbd; --skip-bg: #222a37; --focus: #8fb1ff;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f131b; --surface: #171d28; --sunk: #111621; --line: #2c3546; --fg: #e8ebf1; --muted: #a2abbd;
+  --accent: #9db8f5; --accent-ink: #0f1626; --accent-soft: #1d2840;
+  --pass: #7fd6a0; --pass-bg: #15301f; --review: #f2bf6c; --review-bg: #33260f;
+  --fail: #ff9b90; --fail-bg: #3a1916; --skip: #a2abbd; --skip-bg: #222a37; --focus: #8fb1ff;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-ui); font-size: 18px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 48px;
+}
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+button, input, select, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.wrap { max-width: 1280px; margin: 0 auto; display: grid; gap: 24px; }
+
+/* Header */
+.top { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px 24px;
+  padding-block: 28px 18px; border-bottom: 2px solid var(--fg); }
+.brandmark { display: grid; gap: 2px; }
+.brandmark h1 { font-family: var(--font-display); font-size: 2rem; font-weight: 700; letter-spacing: -0.01em; line-height: 1.1; }
+.brandmark p { margin: 0; color: var(--muted); font-size: 1rem; }
+.engine { display: inline-flex; align-items: center; gap: 10px; font-size: 0.95rem; color: var(--muted); }
+.dot { width: 12px; height: 12px; border-radius: 50%; background: var(--review); flex: none; }
+.engine[data-state="ready"] .dot { background: var(--pass); }
+.engine[data-state="error"] .dot { background: var(--fail); }
+
+/* Mode tabs */
+.tabs { display: flex; gap: 8px; flex-wrap: wrap; }
+.tab { min-height: 52px; padding: 0 22px; border-radius: var(--radius); border: 2px solid var(--line);
+  background: var(--surface); font-weight: 600; cursor: pointer; font-size: 1.05rem; }
+.tab[aria-selected="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+
+/* Panels */
+.desk { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 24px; align-items: start; }
+@media (max-width: 900px) { .desk { grid-template-columns: minmax(0, 1fr); } }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; display: grid; gap: 18px; min-width: 0; }
+.step { display: flex; align-items: baseline; gap: 12px; }
+.step .n { font-family: var(--font-display); font-weight: 700; font-size: 1.1rem; color: var(--accent);
+  border: 2px solid var(--accent); border-radius: 50%; width: 34px; height: 34px; display: grid; place-items: center; flex: none; }
+.step h2 { font-size: 1.3rem; font-weight: 700; }
+.hint { color: var(--muted); font-size: 0.95rem; margin: 0; }
+
+/* Drop zone */
+.drop { position: relative; border: 2px dashed var(--line); border-radius: var(--radius); background: var(--sunk);
+  min-height: 240px; display: grid; place-items: center; text-align: center; padding: 18px; cursor: pointer; overflow: hidden; }
+.drop.over { border-color: var(--accent); background: var(--accent-soft); }
+.drop input[type=file] { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+.drop img { max-width: 100%; max-height: 420px; object-fit: contain; border-radius: 4px; display: block; }
+.drop .empty { display: grid; gap: 6px; pointer-events: none; }
+.drop .empty strong { font-size: 1.1rem; }
+.filemeta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; font-size: 0.95rem; color: var(--muted); }
+.samples { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.samples span { font-size: 0.95rem; color: var(--muted); margin-right: 4px; }
+.chip { min-height: 40px; padding: 0 14px; border: 1px solid var(--line); background: var(--surface); border-radius: 999px; cursor: pointer; font-size: 0.95rem; }
+.chip:hover { border-color: var(--accent); }
+.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+
+/* Form */
+.form { display: grid; gap: 16px; }
+.field { display: grid; gap: 6px; }
+.field label, .legend { font-weight: 600; font-size: 1rem; }
+.field .opt { font-weight: 400; color: var(--muted); }
+.field input, .field textarea { min-height: 50px; padding: 10px 14px; border: 2px solid var(--line); border-radius: 8px; background: var(--surface); width: 100%; }
+.field textarea { min-height: 120px; font-family: var(--font-mono); font-size: 0.9rem; }
+.field input:focus, .field textarea:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 520px) { .two { grid-template-columns: 1fr; } }
+.seg { display: flex; flex-wrap: wrap; gap: 8px; border: 0; padding: 0; margin: 0; }
+.seg label { display: inline-flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 16px; border: 2px solid var(--line); border-radius: 8px; cursor: pointer; font-weight: 500; }
+.seg input { width: 20px; height: 20px; accent-color: var(--accent); }
+.seg label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+
+.btn { min-height: 56px; padding: 0 28px; border-radius: var(--radius); border: 2px solid var(--accent); background: var(--accent); color: var(--accent-ink);
+  font-weight: 700; font-size: 1.15rem; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 10px; }
+.btn:disabled { opacity: 0.55; cursor: progress; }
+.btn.secondary { background: var(--surface); color: var(--accent); }
+.btn.small { min-height: 44px; font-size: 1rem; padding: 0 16px; }
+.actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+details.more summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: 1rem; min-height: 40px; display: flex; align-items: center; }
+details.more[open] summary { margin-bottom: 10px; }
+
+/* Results */
+.results { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 12px); }
+@media (max-width: 900px) { .results { position: static; } }
+.verdict { border-radius: var(--radius); padding: 18px 20px; display: grid; gap: 4px; border: 2px solid currentColor; }
+.verdict h2 { font-family: var(--font-display); font-size: 1.7rem; line-height: 1.2; }
+.verdict p { margin: 0; color: var(--fg); }
+.verdict[data-v="pass"] { color: var(--pass); background: var(--pass-bg); }
+.verdict[data-v="review"] { color: var(--review); background: var(--review-bg); }
+.verdict[data-v="fail"] { color: var(--fail); background: var(--fail-bg); }
+.verdict[data-v="idle"] { color: var(--muted); background: var(--sunk); border-style: dashed; }
+.verdict .time { font-variant-numeric: tabular-nums; font-size: 0.95rem; color: var(--muted); }
+
+.rows { display: grid; gap: 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.row { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 14px; padding: 16px; border-top: 1px solid var(--line); background: var(--surface); }
+.row:first-child { border-top: 0; }
+@media (max-width: 520px) { .row { grid-template-columns: minmax(0, 1fr); gap: 8px; } }
+.row h3 { font-size: 1.05rem; font-weight: 700; }
+.pair { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; font-size: 0.95rem; margin-top: 6px; }
+.pair dt { color: var(--muted); }
+.pair dd { margin: 0; font-family: var(--font-mono); font-size: 0.88rem; overflow-wrap: anywhere; }
+.note { margin: 6px 0 0; font-size: 0.98rem; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 999px; font-weight: 700; font-size: 0.92rem; width: max-content; height: max-content; white-space: nowrap; }
+.pill::before { font-size: 0.95em; }
+.pill.pass { color: var(--pass); background: var(--pass-bg); } .pill.pass::before { content: "✓"; }
+.pill.review { color: var(--review); background: var(--review-bg); } .pill.review::before { content: "!"; font-weight: 800; }
+.pill.fail { color: var(--fail); background: var(--fail-bg); } .pill.fail::before { content: "✕"; }
+.pill.skip { color: var(--skip); background: var(--skip-bg); } .pill.skip::before { content: "–"; }
+.pill.queued { color: var(--skip); background: var(--skip-bg); } .pill.working { color: var(--accent); background: var(--accent-soft); }
+.pill.error { color: var(--fail); background: var(--fail-bg); }
+
+.subchecks { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.subchecks li { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px; align-items: start; font-size: 0.95rem; }
+.subchecks .pill { font-size: 0.8rem; padding: 2px 9px; }
+.diff { margin-top: 12px; padding: 12px 14px; background: var(--sunk); border-radius: 8px; font-size: 0.95rem; line-height: 1.7; }
+.diff del { color: var(--fail); background: var(--fail-bg); text-decoration-thickness: 2px; padding: 0 2px; border-radius: 3px; }
+.diff ins { color: var(--pass); background: var(--pass-bg); text-decoration: none; padding: 0 2px; border-radius: 3px; font-weight: 600; }
+.diff .key { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.85rem; color: var(--muted); margin-top: 6px; }
+.cite { font-size: 0.85rem; color: var(--muted); }
+pre.ocr { margin: 0; padding: 14px; background: var(--sunk); border-radius: 8px; font-family: var(--font-mono); font-size: 0.85rem; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
+.banner { padding: 14px 16px; border-radius: 8px; background: var(--review-bg); color: var(--fg); border-left: 5px solid var(--review); font-size: 0.98rem; }
+.banner.error { background: var(--fail-bg); border-left-color: var(--fail); }
+.progress { height: 10px; background: var(--sunk); border-radius: 999px; overflow: hidden; }
+.progress > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s ease; }
+@media (prefers-reduced-motion: reduce) { .progress > i { transition: none; } }
+.spinner { width: 20px; height: 20px; border: 3px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+
+/* Batch */
+.batchgrid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
+@media (max-width: 900px) { .batchgrid { grid-template-columns: minmax(0, 1fr); } }
+.summary { display: flex; flex-wrap: wrap; gap: 10px; }
+.filter { min-height: 46px; padding: 0 16px; border-radius: 8px; border: 2px solid var(--line); background: var(--surface); cursor: pointer; font-weight: 600; font-variant-numeric: tabular-nums; display: inline-flex; align-items: center; gap: 8px; }
+.filter[aria-pressed="true"] { border-color: var(--fg); }
+.filter b { font-size: 1.15rem; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 0.98rem; background: var(--surface); }
+th, td { text-align: left; padding: 12px 14px; border-top: 1px solid var(--line); vertical-align: top; }
+th { background: var(--sunk); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border-top: 0; }
+td.file { font-family: var(--font-mono); font-size: 0.85rem; overflow-wrap: anywhere; max-width: 220px; }
+tr.sel td { background: var(--accent-soft); }
+.linkbtn { background: none; border: 0; color: var(--accent); font-weight: 700; cursor: pointer; padding: 6px 0; text-decoration: underline; text-underline-offset: 3px; }
+code.inline { font-family: var(--font-mono); font-size: 0.85rem; background: var(--sunk); padding: 2px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+.detail { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 20px; align-items: start; }
+@media (max-width: 900px) { .detail { grid-template-columns: minmax(0, 1fr); } }
+.detail img { max-width: 100%; border-radius: 6px; border: 1px solid var(--line); }
+.toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(24px + env(safe-area-inset-bottom, 0px)); background: var(--fg); color: var(--bg); padding: 12px 20px; border-radius: 8px; font-weight: 600; z-index: 20; max-width: calc(100% - 32px); }
+footer { color: var(--muted); font-size: 0.9rem; border-top: 1px solid var(--line); padding-top: 16px; display: grid; gap: 4px; }
+footer p { margin: 0; max-width: 80ch; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="brandmark">
+      <h1>Alcohol Label Verifier</h1>
+      <p>Checks a label image against its application. Prototype for compliance review.</p>
+    </div>
+    <div class="engine" id="engine" data-state="loading" role="status" aria-live="polite">
+      <span class="dot" aria-hidden="true"></span><span id="engineText">Loading the reading engine…</span>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Mode">
+    <button class="tab" role="tab" id="tab-single" aria-selected="true" aria-controls="view-single">One label</button>
+    <button class="tab" role="tab" id="tab-batch" aria-selected="false" aria-controls="view-batch">Many labels (batch)</button>
+  </nav>
+
+  <!-- ============ ONE LABEL ============ -->
+  <section id="view-single" role="tabpanel" aria-labelledby="tab-single" class="desk">
+    <div class="panel">
+      <div class="step"><span class="n">1</span><h2>Label image</h2></div>
+      <div class="drop" id="drop">
+        <input type="file" id="file" accept="image/*" aria-label="Choose a label image">
+        <div class="empty" id="dropEmpty"><strong>Drop the label image here</strong><span class="hint">or click to choose a file (JPG or PNG)</span></div>
+        <img id="preview" alt="Label image being checked" hidden>
+      </div>
+      <div class="filemeta" id="filemeta" hidden><span id="fileName"></span><button class="linkbtn" id="changeFile" type="button">Choose a different image</button></div>
+      <div class="samples" id="samples"><span>Try a sample:</span></div>
+      <details class="more" id="textMode">
+        <summary>No image? Type or paste the label text instead</summary>
+        <div class="field">
+          <label for="labelText">Label text</label>
+          <textarea id="labelText" placeholder="Paste everything printed on the label…"></textarea>
+          <p class="hint">Text checks cover wording and capital letters. Bold type can only be checked from an image.</p>
+        </div>
+      </details>
+
+      <div class="step"><span class="n">2</span><h2>Application details</h2></div>
+      <p class="hint">Enter what the application says. The label is checked against these values.</p>
+      <form class="form" id="appForm" novalidate>
+        <fieldset class="seg" id="btype">
+          <legend class="legend sr">Beverage type</legend>
+          <label><input type="radio" name="beverageType" value="spirits" id="bt-spirits" checked> Distilled spirits</label>
+          <label><input type="radio" name="beverageType" value="wine" id="bt-wine"> Wine</label>
+          <label><input type="radio" name="beverageType" value="beer" id="bt-beer"> Beer / malt beverage</label>
+        </fieldset>
+        <div class="field"><label for="brandName">Brand name</label><input id="brandName" name="brandName" autocomplete="off"></div>
+        <div class="field"><label for="classType">Class / type</label><input id="classType" name="classType" autocomplete="off" placeholder="e.g. Kentucky Straight Bourbon Whiskey"></div>
+        <div class="two">
+          <div class="field"><label for="alcoholContent">Alcohol content</label><input id="alcoholContent" name="alcoholContent" autocomplete="off" placeholder="45% Alc./Vol. (90 Proof)"></div>
+          <div class="field"><label for="netContents">Net contents</label><input id="netContents" name="netContents" autocomplete="off" placeholder="750 mL"></div>
+        </div>
+        <div class="field"><label for="bottler">Bottler / producer name &amp; address</label><input id="bottler" name="bottler" autocomplete="off" placeholder="Name, City, State"></div>
+        <div class="field"><label for="countryOfOrigin">Country of origin <span class="opt">(imports only)</span></label><input id="countryOfOrigin" name="countryOfOrigin" autocomplete="off"></div>
+        <div class="actions">
+          <button class="btn" id="checkBtn" type="submit">Check label</button>
+          <button class="btn secondary small" id="clearBtn" type="button">Clear</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="panel results" id="results" aria-live="polite">
+      <div class="verdict" id="verdict" data-v="idle"><h2>No label checked yet</h2><p>Add a label image and the application details, then press <b>Check label</b>.</p></div>
+      <div id="resultBody"></div>
+    </div>
+  </section>
+
+  <!-- ============ BATCH ============ -->
+  <section id="view-batch" role="tabpanel" aria-labelledby="tab-batch" hidden>
+    <div class="batchgrid">
+      <div class="panel">
+        <div class="step"><span class="n">1</span><h2>Add label images and the application spreadsheet</h2></div>
+        <div class="drop" id="bdrop" style="min-height:180px">
+          <input type="file" id="bfiles" multiple accept="image/*,.csv,text/csv" aria-label="Choose label images and a CSV file">
+          <div class="empty"><strong>Drop all the label images and one CSV file here</strong><span class="hint">or click to choose files. You can select hundreds at once.</span></div>
+        </div>
+        <p class="hint" id="bstatus">No files added yet.</p>
+        <div class="actions">
+          <button class="btn" id="bstart" type="button" disabled>Check all labels</button>
+          <button class="btn secondary small" id="bsample" type="button">Load the sample batch</button>
+          <button class="btn secondary small" id="bclear" type="button">Clear</button>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="step"><span class="n">2</span><h2>Spreadsheet format</h2></div>
+        <p class="hint">One row per label. The <b>filename</b> column must match the image file name. Save from Excel as “CSV (Comma delimited)”.</p>
+        <pre class="ocr" id="template"></pre>
+        <div class="actions"><button class="btn secondary small" id="copyTemplate" type="button">Copy template</button></div>
+      </div>
+    </div>
+    <div class="panel" id="bresults" hidden style="margin-top:24px">
+      <div class="actions" style="justify-content:space-between">
+        <h2 style="font-size:1.3rem">Batch results</h2>
+        <div class="actions">
+          <button class="btn secondary small" id="bstop" type="button" hidden>Stop</button>
+          <button class="btn secondary small" id="bcopy" type="button">Copy results as CSV</button>
+        </div>
+      </div>
+      <div class="progress" aria-hidden="true"><i id="bbar"></i></div>
+      <p class="hint" id="bprog" role="status" aria-live="polite"></p>
+      <div class="summary" id="bsummary"></div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Label file</th><th>Brand</th><th>Result</th><th>Needs attention</th><th><span class="sr">Details</span></th></tr></thead>
+        <tbody id="btable"></tbody>
+      </table></div>
+      <div id="bdetail"></div>
+    </div>
+  </section>
+
+  <footer>
+    <p><b>Runs entirely on this computer.</b> Label images are read in the browser by a built-in text-recognition engine; nothing is uploaded or stored, and no outside AI service is called.</p>
+    <p>This tool flags differences for an agent to review. It does not approve or reject applications. Health warning text per 27 CFR 16.21.</p>
+  </footer>
+</div>
+<div class="toast" id="toast" hidden role="status"></div>
+
+<script src="vendor/tesseract.min.js"></script>
+<script src="src/verify.js"></script>
+<script src="src/preprocess.js"></script>
+<script src="src/engine.js"></script>
+<script src="src/app.js"></script>

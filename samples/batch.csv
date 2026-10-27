@@ -1,0 +1,7 @@
+filename,beverage_type,brand_name,class_type,alcohol_content,net_contents,bottler,country_of_origin,expected
+old-tom-bourbon.png,Distilled spirits,OLD TOM DISTILLERY,Kentucky Straight Bourbon Whiskey,45% Alc./Vol. (90 Proof),750 mL,"Old Tom Distillery, Bardstown, Kentucky",,Compliant label
+stones-throw-gin.png,Distilled spirits,Stone's Throw,London Dry Gin,41.5% Alc./Vol. (83 Proof),1000 mL,"Stone's Throw Spirits, Portland, Oregon",,Brand capitalization differs from application (should pass)
+riverbend-vodka.png,Distilled spirits,RIVERBEND,Vodka,40% Alc./Vol. (80 Proof),750 mL,"Riverbend Spirits Co., Louisville, Kentucky",,"Warning heading in title case, not bold (should fail)"
+colle-alto-chianti.png,Wine,COLLE ALTO,Chianti Classico Red Wine,13.5% Alc./Vol.,750 mL,"Harbor Light Imports, Baltimore, Maryland",Italy,"Imported wine, ABV on label differs from application (should fail)"
+hop-field-ipa.png,Beer,HOP FIELD,India Pale Ale,6.8% Alc./Vol.,355 mL,"Hop Field Brewing, Asheville, North Carolina",,"Net contents in fl oz (should pass), warning reworded (should fail)"
+old-tom-photo.jpg,Distilled spirits,OLD TOM DISTILLERY,Kentucky Straight Bourbon Whiskey,45% Alc./Vol. (90 Proof),750 mL,"Old Tom Distillery, Bardstown, Kentucky",,Same compliant label photographed at an angle with glare

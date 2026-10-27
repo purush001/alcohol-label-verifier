@@ -1,0 +1,22 @@
+{
+  "name": "alcohol-label-verifier",
+  "version": "0.1.0",
+  "description": "Checks alcohol label images against application data, fully offline in the browser",
+  "scripts": {
+    "build": "node scripts/build.js",
+    "start": "node scripts/build.js && node scripts/serve.js",
+    "test": "node --test tests/verify.test.js",
+    "e2e": "node tests/ocr-e2e.js",
+    "samples": "python3 scripts/make_samples.py"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
+    "tesseract.js": "^5.1.1",
+    "tesseract.js-core": "^5.1.1"
+  },
+  "private": true,
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}
