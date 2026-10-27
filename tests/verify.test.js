@@ -237,3 +237,70 @@ test("audit: verification IDs are deterministic and the hash chain detects edits
   assert.equal(bad.ok, false);
   assert.equal(bad.brokenAt, 2);
 });
+
+// ---------------- second test round ----------------
+
+test("address words must appear next to the name, not elsewhere on the label", () => {
+  const app = "Old Tom Distillery, Bardstown, Kentucky";
+  const ok = V.checkNameAddress(app, V.tokenize("OLD TOM DISTILLERY Kentucky Straight Bourbon 45% Bottled by Old Tom Distillery, Bardstown, KY GOVERNMENT WARNING"));
+  assert.equal(ok.status, "pass");
+  const noState = V.checkNameAddress(app, V.tokenize("OLD TOM DISTILLERY Kentucky Straight Bourbon Whiskey 45% Alc./Vol. 750 mL Bottled by Old Tom Distillery, Bardstown GOVERNMENT WARNING (1) According"));
+  assert.equal(noState.status, "review");
+  assert.match(noState.note, /KENTUCKY/);
+  assert.equal(V.checkNameAddress(app, V.tokenize("Bottled in Bardstown, Kentucky")).status, "fail");
+});
+
+test("a different legal entity (LLC vs Inc.) is flagged", () => {
+  const f = V.checkNameAddress("Hill Country Distillery LLC, Austin, TX", V.tokenize("Distilled by Hill Country Distillery Inc., Austin, TX"));
+  assert.equal(f.status, "review");
+  assert.match(f.note, /LLC/);
+  assert.match(f.note, /INC/);
+});
+
+test("tester cases: 40.0% ABV, 0.75 L vs 750 mL / 25.4 FL. OZ., range 12-13.5%", () => {
+  assert.equal(V.checkAlcohol("40.0% ABV", "40% Alc./Vol. (80 Proof)", "spirits").status, "pass");
+  const vol = V.checkNetContents("0.75 L", "750 mL / 25.4 FL. OZ.");
+  assert.equal(vol.status, "pass");
+  assert.doesNotMatch(vol.note, /\.\./);
+  assert.equal(V.checkAlcohol("12.5%", "12% - 13.5% Alc. by Vol.", "wine").status, "review");
+});
+
+test("print resolution is read from PNG and JPEG headers", () => {
+  const png = new Uint8Array(8 + 25 + 21 + 12);
+  png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  png.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);                 // IHDR (13 bytes + crc)
+  png.set([0, 0, 0, 9, 0x70, 0x48, 0x59, 0x73, 0, 0, 0x2e, 0x23, 0, 0, 0x2e, 0x23, 1], 33);   // pHYs 11811 px/m
+  assert.equal(P.readImageDpi(png), 300);
+  const jpg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 1, 0, 200, 0, 200, 0, 0]);
+  assert.equal(P.readImageDpi(jpg), 200);
+  assert.equal(P.readImageDpi(new Uint8Array(40)), null);
+});
+
+test("type size is checked against the container minimum when the DPI is known", () => {
+  const app = { beverageType: "spirits", brandName: "X", alcoholContent: "45%", netContents: "750 mL" };
+  const text = "X 45% ALC/VOL 750 mL " + V.WARNING_FULL;
+  const small = V.verifyLabel(app, { text, bold: { ratio: 1.5 }, physical: { dpi: 300, textHeightMm: 0.9 } });
+  const c = small.fields.find((f) => f.key === "warning").checks.find((x) => /16\.22/.test(x.name));
+  assert.equal(c.status, "review");
+  assert.match(c.note, /2 mm/);
+  const big = V.verifyLabel(app, { text, bold: { ratio: 1.5 }, physical: { dpi: 300, textHeightMm: 2.4 } });
+  assert.equal(big.fields.find((f) => f.key === "warning").checks.find((x) => /16\.22/.test(x.name)).status, "pass");
+  const none = V.verifyLabel(app, { text, bold: { ratio: 1.5 } });
+  assert.equal(none.fields.find((f) => f.key === "warning").checks.find((x) => /16\.22/.test(x.name)).status, "skip");
+  const miniBottle = V.verifyLabel({ ...app, netContents: "50 mL" }, { text: text.replace("750", "50"), bold: { ratio: 1.5 }, physical: { dpi: 300, textHeightMm: 1.2 } });
+  assert.equal(miniBottle.fields.find((f) => f.key === "warning").checks.find((x) => /16\.22/.test(x.name)).status, "pass");
+});
+
+test("an exported audit CSV is checked cell by cell against the log", async () => {
+  A._resetForTests();
+  await A.append({ verificationId: "a", verdict: "fail", file: "x.png", fields: [] });
+  await A.append({ verificationId: "b", verdict: "pass", file: "y.png", fields: [] });
+  const rows = await A.exportRows();
+  const csv = V.toCSV(rows);
+  assert.equal((await A.compareExport(V.parseCSVRows(csv))).ok, true);
+  const edited = V.parseCSVRows(csv);
+  edited[1][rows[0].indexOf("verdict")] = "pass";      // someone flips a result in the spreadsheet
+  const r = await A.compareExport(edited);
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.changed[0].columns, ["verdict"]);
+});

@@ -1,5 +1,5 @@
 <title>Alcohol Label Verifier</title>
-<meta name="purush:viewport-fit-sides" content="cover">
+<meta name="claude:viewport-fit-sides" content="cover">
 <meta name="description" content="Checks an alcohol beverage label image against its application data: brand, class/type, alcohol content, net contents, bottler, origin and the government health warning.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -167,6 +167,7 @@ pre.ocr { margin: 0; padding: 14px; background: var(--sunk); border-radius: 8px;
 .banner.ok { background: var(--pass-bg); border-left-color: var(--pass); }
 td.num { font-variant-numeric: tabular-nums; text-align: right; }
 .idline { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+label.btn:focus-within { outline: 3px solid var(--focus); outline-offset: 2px; }
 .progress { height: 10px; background: var(--sunk); border-radius: 999px; overflow: hidden; }
 .progress > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s ease; }
 @media (prefers-reduced-motion: reduce) { .progress > i { transition: none; } }
@@ -317,6 +318,7 @@ footer p { margin: 0; max-width: 80ch; }
       <div class="actions">
         <button class="btn small" id="averify" type="button">Check log integrity</button>
         <button class="btn secondary small" id="acopy" type="button">Copy audit log as CSV</button>
+        <label class="btn secondary small" for="acsv" style="cursor:pointer">Check an exported CSV<input type="file" id="acsv" accept=".csv,text/csv" class="sr"></label>
       </div>
       <div class="banner" id="aresult" hidden role="status" aria-live="polite"></div>
       <div class="tablewrap"><table>

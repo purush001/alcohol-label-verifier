@@ -105,9 +105,30 @@ There is no API quota to drain and no server to overload; each agent's browser d
 - **PDF export.** The viewer sandbox blocks page-initiated downloads, so the export is copy-to-clipboard CSV. A self-hosted build can add a download button.
 - **Original images are not stored**, only their hashes, to avoid keeping PII in the browser. To prove which image was checked, keep the submitted file in the system of record (COLA); its SHA-256 matches the log.
 
+## Second test round (live app at purush001.github.io)
+
+A second report tested the deployed app. Most of it repeats the first review's assumptions (an LLM vision call, `is_bold` booleans from a model, API rate limits). Those don't apply, and the earlier changes above already cover them. The concrete test cases were run against the checks:
+
+| Test case from the report | Result before | Now |
+|---|---|---|
+| Label `40% Alc./Vol. (80 Proof)` with a non-breaking space; application `40.0% ABV` | Matches | Matches (no change needed) |
+| Label `750 mL / 25.4 FL. OZ.`; application `0.75 L` | Matches (note had a stray double period) | Matches; note fixed |
+| Label `12% - 13.5% Alc. by Vol.`; application `12.5%` | Check (range on label) | Unchanged: a range vs a single value is left to the agent |
+| Application `Distillery LLC`; label `Distillery Inc.` | Check, note said only "LLC missing" | **Check**, with the note "Business entity differs: application says LLC, label says INC" |
+| Address with the state missing, where the state word appears elsewhere (e.g. "*Kentucky* Straight Bourbon") | **Matches — a real bug** | **Check**: "Missing or unclear next to the name: KENTUCKY" |
+| 100+ large PNGs in one batch | Bounded queue, 20 MB / 50 MP caps | Also frees each image's pixel memory as soon as both reads finish |
+| Page reload mid-batch | Resumes from the audit log | Unchanged |
+| Exported CSV edited after the fact | Hashes in the export, but nothing to check them against | **Check an exported CSV** button on the Audit log tab compares every cell with the log and names the changed entries and columns |
+| Minimum warning type size by container (27 CFR 16.22) | Not measured (only a relative-size check) | Measured in millimetres when the image records its print resolution (≥ 150 DPI). The minimum is 1 mm up to 237 mL, 2 mm up to 3 L, 3 mm above that. Below the minimum it goes to **Check**; without a resolution the sub-check shows "Not measured" with the minimum to check by eye |
+
+**The address fix.** The bottler/producer check now looks for the address words only next to where the name appears. When the name appears more than once (brand line and bottler line), it uses the occurrence with the most of the address around it. A city or state printed elsewhere on the label can no longer complete the address. If the name itself isn't found, the item can't pass.
+
+**Not adopted.** The report suggests an absolute bold threshold (stroke-to-height ≥ 0.18). The app compares the heading's stroke weight with the warning text's own, so it adapts to the typeface, the resolution and the blur of the photo. An absolute number would misjudge light or heavy typefaces.
+
 ## Remaining limitations
 
 - Thresholds for bold, capitals and legibility come from synthetic labels and need calibration on real COLA submissions.
 - OCR that can't read pale or very small text reports the warning as missing (**Doesn't match**) rather than as illegible. This is a safe outcome, but the note could be more specific.
+- Physical type size uses the height of the warning's words as an approximation of type size, and only works when the artwork file records its resolution. Phone photos don't, so for them the check shows "Not measured".
 - Instruction-text detection is pattern-based, so it is a tripwire, not a guarantee. Because no model interprets the text, it is informational only.
 - The browser audit log protects against accidental or casual editing. Regulatory-grade auditability needs the server-side signing described above.

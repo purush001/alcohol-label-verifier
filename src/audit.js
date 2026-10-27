@@ -192,12 +192,34 @@
     return rows;
   }
 
+  /**
+   * Compare a previously exported CSV (as rows of cells, header first) with the log.
+   * Every cell of every row must equal what the log holds for that entry now.
+   * Returns { checked, changed: [{ seq, columns }], unknown: [seq], ok }.
+   */
+  async function compareExport(rows) {
+    if (!rows || rows.length < 2) return { ok: false, checked: 0, changed: [], unknown: [], reason: "The file has no audit rows." };
+    const current = await exportRows();
+    const head = current[0];
+    const fileHead = rows[0].map((h) => h.trim());
+    if (fileHead.join(",") !== head.join(",")) return { ok: false, checked: 0, changed: [], unknown: [], reason: "This is not an audit log export from this app (the columns are different)." };
+    const bySeq = new Map(current.slice(1).map((r) => [String(r[0]), r]));
+    const changed = [], unknown = [];
+    for (const r of rows.slice(1)) {
+      const mine = bySeq.get(String(r[0]).trim());
+      if (!mine) { unknown.push(r[0]); continue; }
+      const cols = head.filter((_, i) => String(mine[i] ?? "") !== String(r[i] ?? ""));
+      if (cols.length) changed.push({ seq: r[0], columns: cols });
+    }
+    return { ok: !changed.length && !unknown.length, checked: rows.length - 1, changed, unknown };
+  }
+
   /** Compact per-field record that goes into the log (the full result is kept for reuse). */
   function summarizeFields(result) {
     return result.fields.map((f) => ({ key: f.key, status: f.status, found: f.found || "", note: f.note || "",
       checks: f.checks ? f.checks.map((c) => ({ name: c.name, status: c.status })) : undefined }));
   }
 
-  return { sha256Hex, canonical, ids, append, verifyChain, list, findById, persistent, saveBatch, lastBatch, exportRows,
+  return { sha256Hex, canonical, ids, append, verifyChain, list, findById, persistent, saveBatch, lastBatch, exportRows, compareExport,
     summarizeFields, applicationOnly, GENESIS, _resetForTests() { storePromise = null; queue = Promise.resolve(); } };
 });

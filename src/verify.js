@@ -140,6 +140,20 @@
     return best;
   }
 
+  /** Every place `target` appears (score >= minScore), best first. Same matching as bestWindow. */
+  function windowsAbove(target, tokens, minScore) {
+    const out = [];
+    let rest = tokens, offset = 0;
+    for (let guard = 0; guard < 20; guard++) {
+      const w = bestWindow(target, rest);
+      if (w.start < 0 || w.score < minScore) break;
+      out.push({ score: w.score, start: w.start + offset, end: w.end + offset });
+      // blank out this occurrence and search again
+      rest = rest.map((t, i) => (i >= w.start && i < w.end ? { raw: "", norm: "\u0000" } : t));
+    }
+    return out.sort((a, b) => b.score - a.score || a.start - b.start);
+  }
+
   function snippet(tokens, start, end) {
     return tokens.slice(start, end).map((t) => t.raw).join(" ");
   }
@@ -187,32 +201,65 @@
     return out;
   }
 
+  // Business-entity words: "LLC" and "Inc." are different legal entities, not a spelling difference.
+  const ENTITY_WORDS = new Set(["LLC", "INC", "INCORPORATED", "CORP", "CORPORATION", "CO", "COMPANY", "LTD", "LIMITED",
+    "LP", "LLP", "PLC", "GMBH", "SA", "SAS", "SRL", "SPA", "BV", "NV", "AG", "PTY"]);
+
   function checkNameAddress(expected, tokens) {
     const field = { label: "Bottler / producer name & address", expected: expected || "" };
     if (!expected || !expected.trim()) {
       return { ...field, status: "skip", found: "", note: "Not on application — not checked." };
     }
     const want = expandStates(norm(expected).split(" ").filter(Boolean));
-    const have = expandStates(tokens.map((t) => t.norm));
-    const haveSet = new Set(have);
-    const missing = [];
-    let hits = 0;
-    for (const w of want) {
-      if (haveSet.has(w)) { hits++; continue; }
-      // tolerate one OCR slip in longer words
-      const near = w.length >= 5 && have.some((h) => Math.abs(h.length - w.length) <= 1 && levenshtein(h, w) <= 1);
-      if (near) hits += 0.9;
-      else missing.push(w);
+    // Look only around the place where the name appears, so a city or state printed
+    // elsewhere on the label (e.g. "Kentucky Straight Bourbon") can't stand in for the address.
+    const name = expected.split(",")[0];
+    // The name may appear more than once (brand line and bottler line): use the occurrence
+    // whose surroundings hold the most of the address.
+    const scoreRegion = (region) => {
+      const have = expandStates(region.map((t) => t.norm));
+      const haveSet = new Set(have);
+      const missing = [];
+      let hits = 0;
+      for (const w of want) {
+        if (haveSet.has(w)) { hits++; continue; }
+        // tolerate one OCR slip in longer words
+        const near = w.length >= 5 && have.some((h) => Math.abs(h.length - w.length) <= 1 && levenshtein(h, w) <= 1);
+        if (near) hits += 0.9;
+        else missing.push(w);
+      }
+      return { have, haveSet, missing, hits };
+    };
+    let anchor = null, best = null;
+    for (const cand of windowsAbove(name, tokens, 0.6)) {
+      // a few words before ("Bottled by"), and roughly the address length after the name
+      const after = Math.max(0, want.length - (cand.end - cand.start)) + 3;
+      const region = tokens.slice(Math.max(0, cand.start - 4), Math.min(tokens.length, cand.end + after));
+      const sc = scoreRegion(region);
+      // on a tie prefer the later occurrence: the bottler statement usually follows the brand
+      if (!best || sc.hits > best.hits || (sc.hits === best.hits && cand.start > anchor.start)) { best = sc; anchor = cand; }
     }
+    const anchored = !!anchor;
+    if (!anchored) best = scoreRegion(tokens);
+    const { have, haveSet, missing, hits } = best;
     const coverage = want.length ? hits / want.length : 0;
-    // Show the label line that holds the most of these words
-    const w = bestWindow(expected, tokens);
-    const found = w.start >= 0 && w.score > 0.4 ? snippet(tokens, w.start, w.end) : "";
-    if (coverage >= 0.95) return { ...field, status: "pass", found, score: coverage, note: "All name and address words found." };
+    const found = anchored ? snippet(tokens, anchor.start, Math.min(tokens.length, anchor.end + Math.max(0, want.length - (anchor.end - anchor.start)) + 1)) : "";
+    // Legal entity changed (LLC on the application, Inc. on the label)?
+    const wantEntity = want.filter((x) => ENTITY_WORDS.has(x));
+    const haveEntity = have.filter((x) => ENTITY_WORDS.has(x) && !wantEntity.includes(x));
+    if (wantEntity.length && haveEntity.length && wantEntity.some((x) => !haveSet.has(x))) {
+      return { ...field, status: "review", found, score: coverage,
+        note: `Business entity differs: application says ${wantEntity.join(" ")}, label says ${haveEntity.join(" ")}. Check it is the same company.` };
+    }
+    if (!anchored) {
+      return { ...field, status: coverage >= 0.7 ? "review" : "fail", found, score: coverage,
+        note: `The name “${name.trim()}” was not found on the label` + (missing.length ? `; also missing: ${missing.join(", ")}.` : ".") };
+    }
+    if (coverage >= 0.95) return { ...field, status: "pass", found, score: coverage, note: "Name and address found together on the label." };
     if (coverage >= 0.7) return { ...field, status: "review", found, score: coverage,
-      note: "Missing or unclear on label: " + missing.join(", ") + "." };
+      note: "Missing or unclear next to the name: " + missing.join(", ") + "." };
     return { ...field, status: "fail", found, score: coverage,
-      note: missing.length ? "Not found on label: " + missing.join(", ") + "." : "Not found on label." };
+      note: "Not found next to the name: " + missing.join(", ") + "." };
   }
 
   // ---------- alcohol content ----------
@@ -380,7 +427,7 @@
         note: `The label shows different amounts (${onLabel.map((v) => v.text).join(", ")}). Check which is the net contents.` };
       const exact = norm(match.text).replace(/\s/g, "") === norm(expected).replace(/\s/g, "");
       let note = exact ? "Exact match." : `Equivalent amount (${Math.round(app.ml)} mL).`;
-      if (also.length) note += ` Also stated as ${also.map((v) => v.text).join(", ")}.`;
+      if (also.length) note += ` Also stated as ${also.map((v) => v.text.replace(/\.$/, "")).join(", ")}.`;
       return { ...field, status: "pass", found: [match, ...also].map((v) => v.text).join(" / "), note };
     }
     return { ...field, status: "fail", found: onLabel.map((v) => v.text).join(" / "),
@@ -540,6 +587,22 @@
           : "Text size and contrast look normal." });
     }
 
+    // Minimum type size by container (27 CFR 16.22): needs the artwork's print resolution.
+    if (bold !== null && typo) {
+      const phys = typo.physical, ml = typo.containerMl;
+      const min = !ml ? null : ml <= 237 ? 1 : ml <= 3000 ? 2 : 3;
+      if (phys && isFinite(phys.textHeightMm) && min) {
+        const ok = phys.textHeightMm >= min * 0.95;
+        result.checks.push({ name: "Type size (27 CFR 16.22)", status: ok ? "pass" : "review",
+          note: `Warning text is about ${phys.textHeightMm.toFixed(1)} mm tall at ${phys.dpi} DPI; the minimum for this container is ${min} mm.` +
+            (ok ? "" : " Measure the printed label to confirm.") });
+      } else {
+        result.checks.push({ name: "Type size (27 CFR 16.22)", status: "skip",
+          note: min ? `Not measured: the image has no print resolution (DPI), so millimetres can't be worked out. The minimum for this container is ${min} mm.`
+            : "Not measured: needs the net contents and an image with a print resolution (DPI)." });
+      }
+    }
+
     // Bold
     if (bold === null) {
       result.checks.push({ name: "Heading is bold", status: "skip", note: "Bold type can't be checked from typed text." });
@@ -626,7 +689,9 @@
     const tokens = tokenize(text);
     app = app || {};
     const bt = app.beverageType || "spirits";
-    const typo = { caseShape: ocr && ocr.caseShape, legibility: ocr && ocr.legibility };
+    let containerMl = null;
+    try { const v = parseVolumes(app.netContents || "")[0]; containerMl = v ? v.ml : null; } catch (e) { /* ignore */ }
+    const typo = { caseShape: ocr && ocr.caseShape, legibility: ocr && ocr.legibility, physical: ocr && ocr.physical, containerMl };
     const fields = [
       safe("brandName", "Brand name", () => checkText("Brand name", app.brandName, tokens)),
       safe("classType", "Class / type", () => checkText("Class / type", app.classType, tokens)),
@@ -668,7 +733,8 @@
 
   // ---------- CSV (batch) ----------
 
-  function parseCSV(text) {
+  /** CSV text -> array of rows (arrays of cells), quotes handled. */
+  function parseCSVRows(text) {
     const rows = [];
     let row = [], cell = "", q = false;
     const s = String(text).replace(/^﻿/, "");
@@ -689,6 +755,11 @@
     }
     row.push(cell);
     if (row.some((v) => v.trim() !== "")) rows.push(row);
+    return rows;
+  }
+
+  function parseCSV(text) {
+    const rows = parseCSVRows(text);
     if (!rows.length) return [];
     const header = rows[0].map((h) => h.trim().toLowerCase().replace(/[^a-z]/g, ""));
     const map = {
@@ -723,6 +794,6 @@
     norm, tokenize, similarity, levenshtein, bestWindow,
     checkText, checkNameAddress, checkAlcohol, checkNetContents, checkWarning,
     parseAlcohol, parseAlcoholStatements, findAlcoholOnLabel, parseVolumes, alignWords, cleanQuotes,
-    warningWordBoxes, checkIntegrity, verifyLabel, mergeResults, parseCSV, toCSV,
+    warningWordBoxes, checkIntegrity, verifyLabel, mergeResults, parseCSV, parseCSVRows, toCSV,
   };
 });

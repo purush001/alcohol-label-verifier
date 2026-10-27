@@ -8,7 +8,7 @@
   const V = root.LabelVerify, P = root.LabelPre, T = root.LabelType;
   const asset = (p) => new URL(p, document.baseURI).href;
 
-  const ENGINE_VERSION = "label-verifier 0.3.0 / tesseract.js 5.1.1 / eng 4.0.0_best_int";
+  const ENGINE_VERSION = "label-verifier 0.3.1 / tesseract.js 5.1.1 / eng 4.0.0_best_int";
   const LIMITS = {
     maxFileBytes: 20 * 1024 * 1024,   // 20 MB per image
     maxPixels: 50e6,                  // 50 megapixels (refused from the header, before decoding)
@@ -77,7 +77,7 @@
     if (!dims.w || !dims.h || dims.w * dims.h > LIMITS.maxPixels) {
       throw new InputError(`This image is ${dims.w} × ${dims.h} pixels, which is too large to check safely. Resize it below 50 megapixels.`);
     }
-    return { blob, bytes, dims };
+    return { blob, bytes, dims, dpi: P.readImageDpi(bytes) };
   }
 
   /** Decode into a grayscale canvas at a good OCR size. */
@@ -150,9 +150,15 @@
     const job2 = parallel ? read(cleanedCanvas(img)) : null;
     const r1 = (await job1).data;
     const typo = measureTypography(img, r1.words);
+    // Physical size: only trust a stored resolution of 150 DPI or more (phones often write a meaningless 72).
+    if (file.dpi && file.dpi >= 150 && typo.legibility && isFinite(typo.legibility.textHeightPx)) {
+      const scale = img.w / img.original.w;
+      typo.physical = { dpi: file.dpi, textHeightMm: (typo.legibility.textHeightPx / scale / file.dpi) * 25.4 };
+    }
     let result = V.verifyLabel(app, { text: r1.text, ...typo });
     onStage && onStage("Double-checking");
     const r2 = (await (job2 || read(cleanedCanvas(img)))).data;
+    img.canvas.width = img.canvas.height = 0;   // release pixel memory now rather than at garbage collection
     const text2 = r2.text;
     result = V.mergeResults(result, V.verifyLabel(app, { text: r2.text, ...typo }));
     result.ms = performance.now() - t0;
@@ -162,6 +168,8 @@
     result.lowQuality = r1.confidence < 55 && result.tokenCount < 25;
     result.measurements = {
       deskewDegrees: img.angle,
+      dpi: file.dpi || null,
+      warningTextHeightMm: typo.physical ? +typo.physical.textHeightMm.toFixed(2) : null,
       boldRatio: isFinite(typo.bold.ratio) ? +typo.bold.ratio.toFixed(2) : null,
       shortLetterShare: typo.caseShape && isFinite(typo.caseShape.shortFrac) ? +typo.caseShape.shortFrac.toFixed(2) : null,
       warningTextHeightPx: typo.legibility && isFinite(typo.legibility.textHeightPx) ? typo.legibility.textHeightPx : null,

@@ -218,8 +218,8 @@ REDTEAM = [
          note="Warning printed in pale ink that is hard to see",
          spec=dict(BOURBON, warning_color=(176, 169, 155)), app=BOURBON_APP),
     dict(file="rt-micro-warning.png", expected="review|fail",
-         note="Warning printed in tiny type",
-         spec=dict(BOURBON, warning_size=11), app=BOURBON_APP),
+         note="Warning printed in tiny type (artwork saved at 300 DPI, so the size can be measured in mm)",
+         spec=dict(BOURBON, warning_size=11), app=BOURBON_APP, dpi=300),
     dict(file="rt-dual-units.png", expected="pass",
          note="Legitimate label with both cL and mL and a range-free ABV (should pass)",
          spec=dict(BOURBON, net="75 cL / 750 mL"), app=BOURBON_APP),
@@ -245,7 +245,8 @@ def main():
     os.makedirs(rt_dir, exist_ok=True)
     rt_rows = []
     for s in REDTEAM:
-        label(s["spec"]).save(os.path.join(rt_dir, s["file"]), optimize=True)
+        extra = {"dpi": (s["dpi"], s["dpi"])} if s.get("dpi") else {}
+        label(s["spec"]).save(os.path.join(rt_dir, s["file"]), optimize=True, **extra)
         rt_rows.append(dict(filename=s["file"], **s["app"], expected=s["expected"], note=s["note"]))
     with open(os.path.join(rt_dir, "redteam.csv"), "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rt_rows[0].keys()))

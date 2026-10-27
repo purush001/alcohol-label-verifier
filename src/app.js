@@ -553,6 +553,22 @@
         : `The log has been altered: ${r.reason} Entries from #${r.brokenAt} on cannot be trusted.`;
     } catch (e) { $("aresult").className = "banner error"; $("aresult").textContent = "Could not check the log: " + e.message; }
   };
+  $("acsv").addEventListener("change", async () => {
+    const f = $("acsv").files[0];
+    $("acsv").value = "";
+    if (!f) return;
+    $("aresult").hidden = false;
+    try {
+      if (f.size > 20 * 1024 * 1024) throw new Error("That file is over 20 MB.");
+      const r = await A.compareExport(V.parseCSVRows(await f.text()));
+      $("aresult").className = r.ok ? "banner ok" : "banner error";
+      if (r.reason) $("aresult").textContent = r.reason;
+      else if (r.ok) $("aresult").textContent = `All ${r.checked} rows in ${f.name} match the audit log exactly.`;
+      else $("aresult").textContent = `${f.name} does not match the audit log. ` +
+        (r.changed.length ? `Changed: ${r.changed.slice(0, 5).map((c) => `entry #${c.seq} (${c.columns.slice(0, 3).join(", ")})`).join("; ")}${r.changed.length > 5 ? ` and ${r.changed.length - 5} more` : ""}. ` : "") +
+        (r.unknown.length ? `Not in this log: entries ${r.unknown.slice(0, 5).join(", ")}${r.unknown.length > 5 ? "…" : ""}.` : "");
+    } catch (e) { $("aresult").className = "banner error"; $("aresult").textContent = "Could not check that file: " + e.message; }
+  });
   $("acopy").onclick = async () => {
     try { copy(V.toCSV(await A.exportRows())); } catch (e) { toast("Could not read the audit log."); }
   };

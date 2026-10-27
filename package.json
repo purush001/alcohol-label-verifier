@@ -1,6 +1,6 @@
 {
   "name": "alcohol-label-verifier",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Checks alcohol label images against application data, fully offline in the browser",
   "scripts": {
     "build": "node scripts/build.js",

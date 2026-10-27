@@ -132,6 +132,33 @@
     return null;
   }
 
+  /**
+   * Print resolution stored in the file (PNG pHYs chunk, JPEG JFIF header), in dots per inch.
+   * Returns null when the file doesn't say. Used to turn pixel heights into millimetres.
+   */
+  function readImageDpi(bytes) {
+    const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const u32be = (i) => ((b[i] << 24) >>> 0) + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3];
+    const u16be = (i) => (b[i] << 8) | b[i + 1];
+    if (b.length > 33 && b[0] === 0x89 && b[1] === 0x50) {
+      let i = 8;
+      while (i + 12 <= b.length && i < 1 << 20) {
+        const len = u32be(i), type = String.fromCharCode(b[i + 4], b[i + 5], b[i + 6], b[i + 7]);
+        if (type === "pHYs" && len >= 9 && b[i + 16] === 1) return Math.round(u32be(i + 8) * 0.0254);
+        if (type === "IDAT" || type === "IEND") break;
+        i += 12 + len;
+      }
+      return null;
+    }
+    if (b.length >= 18 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff && b[3] === 0xe0 &&
+        b[6] === 0x4a && b[7] === 0x46 && b[8] === 0x49 && b[9] === 0x46) {       // "JFIF"
+      const units = b[13], x = u16be(14);
+      if (units === 1) return x;
+      if (units === 2) return Math.round(x * 2.54);
+    }
+    return null;
+  }
+
   /** Rotate a grayscale image about its centre (bilinear), filling uncovered corners with `fill`. */
   function rotateGray(g, w, h, degrees, fill = 255) {
     const a = (degrees * Math.PI) / 180, cos = Math.cos(a), sin = Math.sin(a);
@@ -198,5 +225,5 @@
     return { gray: rotateGray(g, w, h, angle, edge[edge.length >> 1]), angle };
   }
 
-  return { toGray, flatten, grayToRGBA, toPGM, boxBlur, readImageSize, rotateGray, detectSkew, deskew };
+  return { toGray, flatten, grayToRGBA, toPGM, boxBlur, readImageSize, readImageDpi, rotateGray, detectSkew, deskew };
 });

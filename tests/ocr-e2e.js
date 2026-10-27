@@ -52,6 +52,10 @@ async function runSet(worker, dir, csvName, expectedFor) {
     const img = { ...loaded, gray: P.deskew(loaded.gray, loaded.w, loaded.h).gray };
     const pass1 = (await worker.recognize(Buffer.from(P.toPGM(img.gray, img.w, img.h)))).data;
     const typo = measure(img, pass1.words);
+    const dpi = P.readImageDpi(fs.readFileSync(path.join(dir, app.filename)));
+    if (dpi && dpi >= 150 && typo.legibility && isFinite(typo.legibility.textHeightPx)) {
+      typo.physical = { dpi, textHeightMm: (typo.legibility.textHeightPx / dpi) * 25.4 };   // Node reads at original size
+    }
     let result = V.verifyLabel(app, { text: pass1.text, ...typo });
     // second, independent read of the cleaned image: always run, so the two reads cross-check
     const flat = P.flatten(img.gray, img.w, img.h);
