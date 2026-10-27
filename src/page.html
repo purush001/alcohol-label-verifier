@@ -1,5 +1,5 @@
 <title>Alcohol Label Verifier</title>
-<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="purush:viewport-fit-sides" content="cover">
 <meta name="description" content="Checks an alcohol beverage label image against its application data: brand, class/type, alcohol content, net contents, bottler, origin and the government health warning.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -164,6 +164,9 @@ details.more[open] summary { margin-bottom: 10px; }
 pre.ocr { margin: 0; padding: 14px; background: var(--sunk); border-radius: 8px; font-family: var(--font-mono); font-size: 0.85rem; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
 .banner { padding: 14px 16px; border-radius: 8px; background: var(--review-bg); color: var(--fg); border-left: 5px solid var(--review); font-size: 0.98rem; }
 .banner.error { background: var(--fail-bg); border-left-color: var(--fail); }
+.banner.ok { background: var(--pass-bg); border-left-color: var(--pass); }
+td.num { font-variant-numeric: tabular-nums; text-align: right; }
+.idline { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .progress { height: 10px; background: var(--sunk); border-radius: 999px; overflow: hidden; }
 .progress > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s ease; }
 @media (prefers-reduced-motion: reduce) { .progress > i { transition: none; } }
@@ -209,6 +212,7 @@ footer p { margin: 0; max-width: 80ch; }
   <nav class="tabs" role="tablist" aria-label="Mode">
     <button class="tab" role="tab" id="tab-single" aria-selected="true" aria-controls="view-single">One label</button>
     <button class="tab" role="tab" id="tab-batch" aria-selected="false" aria-controls="view-batch">Many labels (batch)</button>
+    <button class="tab" role="tab" id="tab-audit" aria-selected="false" aria-controls="view-audit">Audit log</button>
   </nav>
 
   <!-- ============ ONE LABEL ============ -->
@@ -263,12 +267,13 @@ footer p { margin: 0; max-width: 80ch; }
 
   <!-- ============ BATCH ============ -->
   <section id="view-batch" role="tabpanel" aria-labelledby="tab-batch" hidden>
+    <div class="banner" id="bresume" hidden style="margin-bottom:24px"></div>
     <div class="batchgrid">
       <div class="panel">
         <div class="step"><span class="n">1</span><h2>Add label images and the application spreadsheet</h2></div>
         <div class="drop" id="bdrop" style="min-height:180px">
           <input type="file" id="bfiles" multiple accept="image/*,.csv,text/csv" aria-label="Choose label images and a CSV file">
-          <div class="empty"><strong>Drop all the label images and one CSV file here</strong><span class="hint">or click to choose files. You can select hundreds at once.</span></div>
+          <div class="empty"><strong>Drop all the label images and one CSV file here</strong><span class="hint">or click to choose files. Up to 1,000 images (20 MB each) and 1,000 spreadsheet rows per batch.</span></div>
         </div>
         <p class="hint" id="bstatus">No files added yet.</p>
         <div class="actions">
@@ -303,8 +308,27 @@ footer p { margin: 0; max-width: 80ch; }
     </div>
   </section>
 
+  <!-- ============ AUDIT LOG ============ -->
+  <section id="view-audit" role="tabpanel" aria-labelledby="tab-audit" hidden>
+    <div class="panel">
+      <div class="step"><h2>Audit log</h2></div>
+      <p class="hint">Every check is recorded here with a Verification ID (a SHA-256 fingerprint of the image, the application data and the engine version) and the result of each rule. Entries are chained by their hashes, so changing or deleting any entry is detected.</p>
+      <p class="hint" id="astatus" role="status">Loading…</p>
+      <div class="actions">
+        <button class="btn small" id="averify" type="button">Check log integrity</button>
+        <button class="btn secondary small" id="acopy" type="button">Copy audit log as CSV</button>
+      </div>
+      <div class="banner" id="aresult" hidden role="status" aria-live="polite"></div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>#</th><th>Time</th><th>Label</th><th>Result</th><th>Verification ID</th><th>Entry hash</th></tr></thead>
+        <tbody id="atable"></tbody>
+      </table></div>
+    </div>
+  </section>
+
   <footer>
     <p><b>Runs entirely on this computer.</b> Label images are read in the browser by a built-in text-recognition engine; nothing is uploaded or stored, and no outside AI service is called.</p>
+    <p>Every check is recorded in a tamper-evident audit log kept in this browser.</p>
     <p>This tool flags differences for an agent to review. It does not approve or reject applications. Health warning text per 27 CFR 16.21.</p>
   </footer>
 </div>
@@ -313,5 +337,7 @@ footer p { margin: 0; max-width: 80ch; }
 <script src="vendor/tesseract.min.js"></script>
 <script src="src/verify.js"></script>
 <script src="src/preprocess.js"></script>
+<script src="src/typography.js"></script>
+<script src="src/audit.js"></script>
 <script src="src/engine.js"></script>
 <script src="src/app.js"></script>

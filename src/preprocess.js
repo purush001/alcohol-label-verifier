@@ -96,5 +96,107 @@
     return out;
   }
 
-  return { toGray, flatten, grayToRGBA, toPGM, boxBlur };
+
+  /**
+   * Read width/height from the file header without decoding the image, so a
+   * "decompression bomb" (small file, enormous dimensions) is refused before it
+   * can exhaust memory. Supports PNG, JPEG, GIF, WebP, BMP. Returns null if unknown.
+   */
+  function readImageSize(bytes) {
+    const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const u16be = (i) => (b[i] << 8) | b[i + 1];
+    const u16le = (i) => b[i] | (b[i + 1] << 8);
+    const u32be = (i) => ((b[i] << 24) >>> 0) + (b[i + 1] << 16) + (b[i + 2] << 8) + b[i + 3];
+    const u32le = (i) => b[i] + (b[i + 1] << 8) + (b[i + 2] << 16) + ((b[i + 3] << 24) >>> 0);
+    if (b.length > 24 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return { type: "png", w: u32be(16), h: u32be(20) };
+    if (b.length > 10 && b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return { type: "gif", w: u16le(6), h: u16le(8) };
+    if (b.length > 26 && b[0] === 0x42 && b[1] === 0x4d) return { type: "bmp", w: u32le(18), h: Math.abs(u32le(22) | 0) };
+    if (b.length > 30 && b[0] === 0x52 && b[1] === 0x49 && b[8] === 0x57 && b[9] === 0x45) {   // RIFF....WEBP
+      const chunk = String.fromCharCode(b[12], b[13], b[14], b[15]);
+      if (chunk === "VP8X") return { type: "webp", w: 1 + (b[24] | (b[25] << 8) | (b[26] << 16)), h: 1 + (b[27] | (b[28] << 8) | (b[29] << 16)) };
+      if (chunk === "VP8 ") return { type: "webp", w: u16le(26) & 0x3fff, h: u16le(28) & 0x3fff };
+      if (chunk === "VP8L") { const v = u32le(21); return { type: "webp", w: (v & 0x3fff) + 1, h: ((v >> 14) & 0x3fff) + 1 }; }
+    }
+    if (b.length > 4 && b[0] === 0xff && b[1] === 0xd8) {
+      let i = 2;
+      while (i + 9 < b.length) {
+        if (b[i] !== 0xff) { i++; continue; }
+        const marker = b[i + 1];
+        if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+        const len = u16be(i + 2);
+        if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc)
+          return { type: "jpeg", w: u16be(i + 7), h: u16be(i + 5) };
+        i += 2 + len;
+      }
+    }
+    return null;
+  }
+
+  /** Rotate a grayscale image about its centre (bilinear), filling uncovered corners with `fill`. */
+  function rotateGray(g, w, h, degrees, fill = 255) {
+    const a = (degrees * Math.PI) / 180, cos = Math.cos(a), sin = Math.sin(a);
+    const cx = (w - 1) / 2, cy = (h - 1) / 2;
+    const out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const dy = y - cy;
+      for (let x = 0; x < w; x++) {
+        const dx = x - cx;
+        const sx = cos * dx - sin * dy + cx, sy = sin * dx + cos * dy + cy;   // inverse map
+        const x0 = Math.floor(sx), y0 = Math.floor(sy);
+        if (x0 < 0 || y0 < 0 || x0 >= w - 1 || y0 >= h - 1) { out[y * w + x] = fill; continue; }
+        const fx = sx - x0, fy = sy - y0, i = y0 * w + x0;
+        const top = g[i] * (1 - fx) + g[i + 1] * fx, bot = g[i + w] * (1 - fx) + g[i + w + 1] * fx;
+        out[y * w + x] = top * (1 - fy) + bot * fy;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Estimate text tilt in degrees: rotate a small ink mask through ±10° and keep the angle
+   * where text lines make the sharpest row profile.
+   */
+  function detectSkew(g, w, h, maxAngle = 10) {
+    const sc = Math.min(1, 420 / Math.max(w, h));
+    const sw = Math.max(8, Math.round(w * sc)), sh = Math.max(8, Math.round(h * sc));
+    const small = new Uint8Array(sw * sh);
+    for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++)
+      small[y * sw + x] = g[Math.min(h - 1, Math.floor(y / sc)) * w + Math.min(w - 1, Math.floor(x / sc))];
+    const bg = boxBlur(small, sw, sh, 7);
+    const ink = new Uint8Array(sw * sh);
+    for (let i = 0; i < ink.length; i++) ink[i] = small[i] < bg[i] - 12 ? 1 : 0;
+    const cx = (sw - 1) / 2, cy = (sh - 1) / 2;
+    const pts = [];
+    for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) if (ink[y * sw + x]) pts.push(x - cx, y - cy);
+    if (pts.length < 50) return 0;
+    const rows = new Float64Array(sh * 2);
+    const score = (deg) => {
+      const a = (-deg * Math.PI) / 180, cos = Math.cos(a), sin = Math.sin(a);
+      rows.fill(0);
+      for (let i = 0; i < pts.length; i += 2) {
+        const ry = Math.round(sin * pts[i] + cos * pts[i + 1] + sh);   // y of the point after rotating by deg
+        if (ry >= 0 && ry < rows.length) rows[ry]++;
+      }
+      let sum = 0;
+      for (let i = 1; i < rows.length; i++) { const d = rows[i] - rows[i - 1]; sum += d * d; }
+      return sum;
+    };
+    let best = 0, bestScore = -1;
+    for (let d = -maxAngle; d <= maxAngle; d += 1) { const s = score(d); if (s > bestScore) { bestScore = s; best = d; } }
+    const coarse = best;
+    for (let d = coarse - 1; d <= coarse + 1.0001; d += 0.2) { const s = score(d); if (s > bestScore) { bestScore = s; best = d; } }
+    return Math.round(best * 10) / 10;
+  }
+
+  /** Straighten a tilted label. Returns { gray, angle } (angle 0 = left as is). */
+  function deskew(g, w, h) {
+    const angle = detectSkew(g, w, h);
+    if (Math.abs(angle) < 0.3) return { gray: g, angle: 0 };
+    const edge = [];
+    for (let x = 0; x < w; x += 7) edge.push(g[x], g[(h - 1) * w + x]);
+    edge.sort((a, b) => a - b);
+    return { gray: rotateGray(g, w, h, angle, edge[edge.length >> 1]), angle };
+  }
+
+  return { toGray, flatten, grayToRGBA, toPGM, boxBlur, readImageSize, rotateGray, detectSkew, deskew };
 });

@@ -1,7 +1,8 @@
 /* app.js — page behavior: single-label review and batch review. */
 (function () {
   "use strict";
-  const V = window.LabelVerify, E = window.LabelEngine;
+  const V = window.LabelVerify, E = window.LabelEngine, A = window.LabelAudit;
+  const BATCH_LIMITS = { maxImages: 1000, maxCsvBytes: 5 * 1024 * 1024, maxRows: 1000 };
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -56,7 +57,7 @@
 
   // ---------------- tabs ----------------
   function selectTab(name) {
-    for (const t of ["single", "batch"]) {
+    for (const t of ["single", "batch", "audit"]) {
       $("tab-" + t).setAttribute("aria-selected", String(t === name));
       $("view-" + t).hidden = t !== name;
     }
@@ -143,6 +144,42 @@
     if (!sampleRows.length) box.hidden = true;
   }
 
+  // ---------------- audit log ----------------
+  /** Keep what's needed to show the result again later (no image, no second OCR text). */
+  function storableResult(r) {
+    const { ocrText2, audit, ...rest } = r;   // eslint-disable-line no-unused-vars
+    return JSON.parse(JSON.stringify(rest));
+  }
+  /** Hash inputs, append to the tamper-evident log, attach { verificationId, seq } to the result. */
+  async function record(result, { data, app, file, source, cached = false, ids = null }) {
+    try {
+      const h = ids || (await A.ids(data, app, E.ENGINE_VERSION));
+      const entry = await A.append({
+        ...h, engine: E.ENGINE_VERSION, source, file: file || "", cached,
+        application: A.applicationOnly(app), verdict: result.verdict,
+        fields: A.summarizeFields(result), measurements: result.measurements || null,
+        result: storableResult(result),
+      });
+      result.audit = { verificationId: h.verificationId, seq: entry.seq, entryHash: entry.entryHash };
+    } catch (e) {
+      console.warn("audit log", e);
+      result.audit = { error: e.message || "The audit log is not available in this browser." };
+    }
+    return result;
+  }
+  function auditHTML(r) {
+    if (!r.audit) return "";
+    if (r.audit.error) return `<span class="time">Not recorded in the audit log: ${esc(r.audit.error)}</span>`;
+    const id = r.audit.verificationId;
+    return `<span class="time idline">Verification ID <code class="inline" title="${esc(id)}">${esc(id.slice(0, 16))}…</code>
+      · audit entry #${r.audit.seq}${r.cached ? " · result reused (same image and inputs)" : ""}
+      <button class="linkbtn" type="button" data-copy-id="${esc(id)}">Copy ID</button></span>`;
+  }
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest && e.target.closest("[data-copy-id]");
+    if (b) copy(b.dataset.copyId);
+  });
+
   // ---------------- single: results ----------------
   function renderIdle() {
     $("verdict").dataset.v = "idle";
@@ -153,9 +190,10 @@
     const n = r.counts;
     const secs = (r.ms / 1000).toFixed(1);
     const how = r.fromText ? "from typed text" : `in ${secs} seconds`;
-    if (r.verdict === "pass") return `<h2>Everything matches</h2><p>All required items on the label agree with the application.</p><span class="time">Checked ${how}</span>`;
-    if (r.verdict === "review") return `<h2>Check ${n.review} item${n.review > 1 ? "s" : ""} by eye</h2><p>Nothing clearly wrong, but the tool is not sure about ${n.review === 1 ? "one item" : "these items"}.</p><span class="time">Checked ${how}</span>`;
-    return `<h2>${n.fail} problem${n.fail > 1 ? "s" : ""} found</h2><p>${n.fail > 1 ? "These items do" : "This item does"} not match the application or the rules.${n.review ? ` ${n.review} more to check by eye.` : ""}</p><span class="time">Checked ${how}</span>`;
+    const tail = `<span class="time">Checked ${how}</span>${auditHTML(r)}`;
+    if (r.verdict === "pass") return `<h2>Everything matches</h2><p>All required items on the label agree with the application.</p>${tail}`;
+    if (r.verdict === "review") return `<h2>Check ${n.review} item${n.review > 1 ? "s" : ""} by eye</h2><p>Nothing clearly wrong, but the tool is not sure about ${n.review === 1 ? "one item" : "these items"}.</p>${tail}`;
+    return `<h2>${n.fail} problem${n.fail > 1 ? "s" : ""} found</h2><p>${n.fail > 1 ? "These items do" : "This item does"} not match the application or the rules.${n.review ? ` ${n.review} more to check by eye.` : ""}</p>${tail}`;
   }
 
   function diffHTML(diff) {
@@ -231,13 +269,18 @@
     running = true;
     $("checkBtn").disabled = true;
     try {
-      if (useText) { renderResult(E.checkText(typed, app)); return; }
-      renderBusy("Reading label");
-      const r = await E.checkLabel(current.src, app, { onStage: renderBusy });
-      renderResult(r);
+      if (useText) {
+        const r = E.checkText(typed, app);
+        renderResult(await record(r, { data: "text:" + typed, app, file: "(typed text)", source: "text" }));
+        return;
+      }
+      renderBusy("Preparing image");
+      const prepared = await E.readBytes(current.src);       // size and format limits, before decoding
+      const r = await E.checkLabel(null, app, { onStage: renderBusy, prepared });
+      renderResult(await record(r, { data: prepared.bytes, app, file: current.name, source: "image" }));
     } catch (e) {
       console.error(e);
-      renderError(e && e.message && /image/i.test(e.message) ? e.message
+      renderError(e instanceof E.InputError ? e.message
         : "The reading engine could not start in this browser. Open “type or paste the label text” to check from text instead.");
     } finally {
       running = false;
@@ -258,14 +301,20 @@
   const keyOf = (name) => String(name).split(/[\\/]/).pop().trim().toLowerCase();
 
   async function addBatchFiles(files) {
+    let skipped = 0;
     for (const f of files) {
       if (/\.csv$/i.test(f.name) || f.type === "text/csv") {
-        batch.rows = V.parseCSV(await f.text());
+        if (f.size > BATCH_LIMITS.maxCsvBytes) { toast("That spreadsheet is over 5 MB. Split it into smaller batches."); continue; }
+        const rows = V.parseCSV(await f.text());
+        if (rows.length > BATCH_LIMITS.maxRows) { toast(`That spreadsheet has ${rows.length} rows. The limit is ${BATCH_LIMITS.maxRows} per batch — split it.`); continue; }
+        batch.rows = rows;
         batch.csvName = f.name;
       } else if (/^image\//.test(f.type) || /\.(jpe?g|png|webp|gif|bmp|tiff?)$/i.test(f.name)) {
+        if (batch.images.size >= BATCH_LIMITS.maxImages && !batch.images.has(keyOf(f.name))) { skipped++; continue; }
         batch.images.set(keyOf(f.name), { file: f, name: f.name });
       }
     }
+    if (skipped) toast(`${skipped} image${skipped > 1 ? "s were" : " was"} not added: the limit is ${BATCH_LIMITS.maxImages} per batch.`);
     updateBatchStatus();
   }
   function updateBatchStatus() {
@@ -338,7 +387,9 @@
       $("bprog").textContent = `Checked ${done} of ${items.length}` + (eta !== null ? ` · about ${eta < 90 ? eta + " seconds" : Math.ceil(eta / 60) + " minutes"} left` : "");
     } else {
       const secs = batch.elapsed ? (batch.elapsed / 1000).toFixed(1) : "0";
-      $("bprog").textContent = batch.stop ? `Stopped after ${done} of ${items.length}.` : `Finished ${items.length} label${items.length === 1 ? "" : "s"} in ${secs} seconds.`;
+      const reused = items.filter((i) => i.result && i.result.cached).length;
+      $("bprog").textContent = (batch.stop ? `Stopped after ${done} of ${items.length}.` : `Finished ${items.length} label${items.length === 1 ? "" : "s"} in ${secs} seconds.`)
+        + (reused ? ` ${reused} result${reused > 1 ? "s" : ""} reused from the audit log (same image and data).` : "");
     }
     const filters = [["all", "All", items.length], ["fail", "Problems", counts.fail], ["review", "Check by eye", counts.review], ["pass", "Everything matches", counts.pass], ["error", "Couldn't check", counts.error]];
     $("bsummary").innerHTML = filters.filter(([k, , n]) => k === "all" || n).map(([k, label, n]) =>
@@ -364,8 +415,9 @@
     batch.selected = idx;
     const it = batch.items[idx];
     if (detailUrl) URL.revokeObjectURL(detailUrl);
-    detailUrl = URL.createObjectURL(it.file);
-    $("bdetail").innerHTML = `<div class="detail" style="margin-top:8px"><div><h3 style="margin-bottom:8px;font-size:1.05rem">${esc(it.name)}</h3><img src="${detailUrl}" alt="Label ${esc(it.name)}"></div>
+    detailUrl = it.file ? URL.createObjectURL(it.file) : null;
+    const pic = detailUrl ? `<img src="${detailUrl}" alt="Label ${esc(it.name)}">` : `<p class="hint">Image not loaded (result restored from the audit log).</p>`;
+    $("bdetail").innerHTML = `<div class="detail" style="margin-top:8px"><div><h3 style="margin-bottom:8px;font-size:1.05rem">${esc(it.name)}</h3>${pic}</div>
       <div style="display:grid;gap:14px"><div class="verdict" data-v="${it.result.verdict}">${verdictHTML(it.result)}</div>${resultHTML(it.result)}</div></div>`;
     renderBatch();
     $("bdetail").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
@@ -375,6 +427,8 @@
     if (batch.running) return;
     try { await startEngine(); } catch (e) { toast("The reading engine could not start in this browser."); return; }
     batch.items = buildItems();
+    batch.session = { id: "batch-" + Date.now(), startedAt: new Date().toISOString(), csvName: batch.csvName || "", finished: false };
+    $("bresume").hidden = true;
     batch.running = true; batch.stop = false; batch.filter = "all"; batch.selected = null;
     batch.timeSpent = 0; batch.finished = 0;
     $("bdetail").innerHTML = "";
@@ -388,10 +442,20 @@
         const it = queue.shift();
         it.state = "working"; renderBatch();
         try {
-          it.result = await E.checkLabel(it.file, it.app, { parallel: false });
+          const prepared = await E.readBytes(it.file);
+          let ids = null, previous = null;
+          try { ids = await A.ids(prepared.bytes, it.app, E.ENGINE_VERSION); previous = await A.findById(ids.verificationId); } catch (_) {}
+          if (previous && previous.result) {
+            // Same image, same application data, same engine: reuse the recorded result (resumes interrupted batches)
+            it.result = { ...previous.result, cached: true, ms: 0 };
+          } else {
+            it.result = await E.checkLabel(null, it.app, { parallel: false, prepared });
+            batch.timeSpent += it.result.ms; batch.finished++;
+          }
+          await record(it.result, { data: prepared.bytes, ids, app: it.app, file: it.name, source: "batch", cached: !!it.result.cached });
           it.state = "done";
-          batch.timeSpent += it.result.ms; batch.finished++;
-        } catch (e) { it.state = "error"; it.error = e.message || "Could not read this image."; }
+        } catch (e) { it.state = "error"; it.error = e instanceof E.InputError ? e.message : "Could not read this image."; }
+        saveBatchState();
         renderBatch();
       }
     };
@@ -406,6 +470,8 @@
     clearInterval(grow);
     batch.items.forEach((i) => { if (i.state === "queued" || i.state === "working") { i.state = "error"; i.error = "Not checked (stopped)."; } });
     batch.elapsed = performance.now() - t0;
+    batch.session.finished = !batch.stop;
+    saveBatchState();
     batch.running = false; $("bstop").hidden = true; updateBatchStatus();
     renderBatch();
   }
@@ -424,8 +490,76 @@
     copy(V.toCSV(rows));
   };
 
+  // ---------------- batch recovery ----------------
+  let saveTimer = null;
+  function saveBatchState() {
+    if (!batch.session) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      const items = batch.items.map((i) => ({ name: i.name, state: i.state, verdict: i.result ? i.result.verdict : null,
+        verificationId: i.result && i.result.audit ? i.result.audit.verificationId : null, error: i.error || null }));
+      const done = items.filter((i) => i.state === "done" || i.state === "error").length;
+      A.saveBatch({ ...batch.session, total: items.length, done, items }).catch(() => {});
+    }, 150);
+  }
+  async function offerResume() {
+    let last = null;
+    try { last = await A.lastBatch(); } catch (_) { return; }
+    if (!last || last.finished || last.done >= last.total) return;
+    const when = new Date(last.startedAt).toLocaleString();
+    $("bresume").hidden = false;
+    $("bresume").innerHTML = `<b>A batch was interrupted.</b> ${last.done} of ${last.total} labels were checked (started ${esc(when)}${last.csvName ? ", " + esc(last.csvName) : ""}).
+      Add the same images and spreadsheet again and press <b>Check all labels</b>: labels already checked are taken from the audit log instead of being read again.
+      <button class="linkbtn" type="button" id="bshowprev">Show the results checked so far</button>`;
+    $("bshowprev").onclick = async () => {
+      const items = [];
+      for (const it of last.items) {
+        let entry = null;
+        if (it.verificationId) { try { entry = await A.findById(it.verificationId); } catch (_) {} }
+        items.push(entry && entry.result ? { name: it.name, app: entry.application, file: null, state: "done", result: { ...entry.result, cached: true, audit: { verificationId: entry.verificationId, seq: entry.seq } } }
+          : { name: it.name, app: null, state: "error", error: it.state === "error" ? it.error : "Not checked yet." });
+      }
+      batch.items = items; batch.running = false; batch.stop = true; batch.filter = "all";
+      $("bresults").hidden = false; renderBatch();
+    };
+  }
+
+  // ---------------- audit log view ----------------
+  async function renderAudit() {
+    let persistent = false, entries = [];
+    try { persistent = await A.persistent(); entries = await A.list(200); }
+    catch (e) { $("astatus").textContent = "The audit log is not available: " + e.message; return; }
+    $("astatus").innerHTML = (persistent
+      ? "Stored in this browser and kept between visits."
+      : "<b>Kept for this session only</b> — this browser is blocking storage (private window?). Copy the log before closing the page.")
+      + ` ${entries.length ? `Showing the latest ${entries.length} entr${entries.length === 1 ? "y" : "ies"}.` : "No checks recorded yet."}`;
+    const word = { pass: "Matches", review: "Check", fail: "Problems" };
+    $("atable").innerHTML = entries.map((e) => `<tr><td class="num">${e.seq}</td><td>${esc(new Date(e.time).toLocaleString())}</td>
+      <td class="file">${esc(e.file || "")}${e.cached ? " <span class=\"cite\">(reused)</span>" : ""}</td>
+      <td><span class="pill ${e.verdict}">${word[e.verdict] || esc(e.verdict)}</span></td>
+      <td><code class="inline" title="${esc(e.verificationId)}">${esc(String(e.verificationId).slice(0, 12))}…</code></td>
+      <td><code class="inline" title="${esc(e.entryHash)}">${esc(String(e.entryHash).slice(0, 12))}…</code></td></tr>`).join("");
+  }
+  $("tab-audit").onclick = () => { selectTab("audit"); renderAudit(); };
+  $("averify").onclick = async () => {
+    $("aresult").hidden = false;
+    $("aresult").className = "banner";
+    $("aresult").textContent = "Checking every entry…";
+    try {
+      const r = await A.verifyChain();
+      $("aresult").className = r.ok ? "banner ok" : "banner error";
+      $("aresult").textContent = r.ok
+        ? `All ${r.count} entries are intact. Latest chain hash: ${r.count ? r.head.slice(0, 16) + "…" : "—"}`
+        : `The log has been altered: ${r.reason} Entries from #${r.brokenAt} on cannot be trusted.`;
+    } catch (e) { $("aresult").className = "banner error"; $("aresult").textContent = "Could not check the log: " + e.message; }
+  };
+  $("acopy").onclick = async () => {
+    try { copy(V.toCSV(await A.exportRows())); } catch (e) { toast("Could not read the audit log."); }
+  };
+
   // ---------------- start ----------------
   (async () => {
+    offerResume();
     await loadSamples();
     const first = sampleRows[0];
     if (first) loadSample(first, false);

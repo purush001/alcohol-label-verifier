@@ -43,11 +43,21 @@
 
   // ---------- text helpers ----------
 
+  /**
+   * Unicode-safe canonical form used before every comparison:
+   * NFKC folds compatibility characters (non-breaking and other odd spaces, full-width
+   * digits, the "ℓ" litre sign, ligatures); zero-width characters are removed so hidden
+   * characters can't split or disguise a word; quotes and dashes are unified.
+   */
   function cleanQuotes(s) {
-    return String(s || "")
+    let t = String(s || "");
+    try { t = t.normalize("NFKC"); } catch (e) { /* very old engines: skip */ }
+    return t
+      .replace(/[​-‍⁠﻿­]/g, "")
+      .replace(/[   -   　]/g, " ")
       .replace(/[‘’‛`´]/g, "'")
       .replace(/[“”‟]/g, '"')
-      .replace(/[–—]/g, "-");
+      .replace(/[‐-―−]/g, "-");
   }
 
   /** Uppercase, drop punctuation (keeps letters, digits, % and .), collapse spaces. */
@@ -208,92 +218,149 @@
   // ---------- alcohol content ----------
 
   function parseNumber(s) {
-    const v = parseFloat(String(s).replace(",", "."));
+    let t = String(s).trim();
+    if (/^\d{1,3}(,\d{3})+$/.test(t)) t = t.replace(/,/g, "");   // 1,000
+    const v = parseFloat(t.replace(",", "."));
     return isFinite(v) ? v : null;
   }
 
-  /** Parse "45% Alc./Vol. (90 Proof)" -> { abv: 45, proof: 90 } */
-  function parseAlcohol(s) {
-    const t = cleanQuotes(s).toUpperCase().replace(/°\/O|0\/0|O\/O/g, "%");
-    let abv = null, proof = null;
-    const pct = t.match(/(\d{1,2}(?:[.,]\d{1,2})?)\s*%/);
-    if (pct) abv = parseNumber(pct[1]);
-    if (abv === null) {
-      const alc = t.match(/ALC(?:OHOL)?\.?\s*(\d{1,2}(?:[.,]\d{1,2})?)/) || t.match(/(\d{1,2}(?:[.,]\d{1,2})?)\s*(?:ALC|ABV)/);
-      if (alc) abv = parseNumber(alc[1]);
-    }
-    const pr = t.match(/(\d{2,3}(?:[.,]\d)?)\s*-?\s*PROOF/);
-    if (pr) proof = parseNumber(pr[1]);
-    if (abv === null && proof !== null) abv = proof / 2;
-    return { abv, proof };
+  const NUM = "(?<![\\d.,])(\\d{1,2}(?:[.,]\\d{1,2})?)";
+
+  function alcoholCanon(s) {
+    return cleanQuotes(s).toUpperCase()
+      .replace(/°\/O|0\/0|O\/O|PERCENT|PCT\b/g, "%")
+      .replace(/\s+/g, " ");
   }
 
-  function findAlcoholOnLabel(text) {
-    const t = cleanQuotes(text).toUpperCase().replace(/°\/O|0\/0|O\/O/g, "%").replace(/\s+/g, " ");
-    const results = [];
-    const re = /(\d{1,2}(?:[.,]\d{1,2})?)\s*%(?:\s*(?:ALC|ALCOHOL|BY|VOL|ABV)[^0-9]{0,24})?(?:\(?\s*(\d{2,3}(?:[.,]\d)?)\s*-?\s*PROOF\s*\)?)?/g;
+  /**
+   * Find every alcohol statement: single values ("45% Alc./Vol."), ranges
+   * ("12% - 14%", "12 TO 14% BY VOL") and stand-alone proof ("90 PROOF").
+   * Returns [{ min, max, text }] plus every proof number seen.
+   */
+  function parseAlcoholStatements(s) {
+    let t = alcoholCanon(s);
+    const statements = [];
+    const blank = (m) => { t = t.slice(0, m.index) + " ".repeat(m[0].length) + t.slice(m.index + m[0].length); };
+    const rangeRe = new RegExp(NUM + "\\s*%?\\s*(?:-|TO)\\s*" + NUM + "\\s*%", "g");
     let m;
-    while ((m = re.exec(t))) {
-      results.push({ abv: parseNumber(m[1]), proof: m[2] ? parseNumber(m[2]) : null, text: m[0].trim() });
+    const ranges = [];
+    while ((m = rangeRe.exec(t))) ranges.push(m);
+    for (const r of ranges) {
+      const a = parseNumber(r[1]), b = parseNumber(r[2]);
+      if (a !== null && b !== null && a < b && b <= 100) {
+        statements.push({ min: a, max: b, text: r[0].trim(), range: true });
+        blank(r);
+      }
     }
-    if (!results.length) {
-      const alc = t.match(/ALC(?:OHOL)?\.?\s*(\d{1,2}(?:[.,]\d{1,2})?)\s*%?\s*(?:BY\s*)?VOL/);
-      if (alc) results.push({ abv: parseNumber(alc[1]), proof: null, text: alc[0] });
+    const valueRe = new RegExp(NUM + "\\s*%", "g");
+    while ((m = valueRe.exec(t))) {
+      const v = parseNumber(m[1]);
+      if (v !== null && v <= 100) statements.push({ min: v, max: v, text: m[0].trim() });
     }
-    if (!results.length) {
-      const pr = t.match(/(\d{2,3}(?:[.,]\d)?)\s*-?\s*PROOF/);
-      if (pr) results.push({ abv: parseNumber(pr[1]) / 2, proof: parseNumber(pr[1]), text: pr[0], proofOnly: true });
+    if (!statements.length) {
+      const alc = t.match(new RegExp("ALC(?:OHOL)?\\.?\\s*" + NUM + "\\s*(?:BY\\s*)?VOL")) || t.match(new RegExp(NUM + "\\s*(?:ALC|ABV)"));
+      if (alc) { const v = parseNumber(alc[1]); statements.push({ min: v, max: v, text: alc[0].trim() }); }
     }
-    return results;
+    const proofs = [];
+    const proofRe = /(?<![\d.,])(\d{2,3}(?:[.,]\d)?)\s*-?\s*PROOF/g;
+    while ((m = proofRe.exec(alcoholCanon(s)))) proofs.push({ proof: parseNumber(m[1]), text: m[0].trim() });
+    return { statements, proofs };
   }
+
+  /** Parse "45% Alc./Vol. (90 Proof)" -> { abv: 45, proof: 90, min, max } (application side) */
+  function parseAlcohol(s) {
+    const { statements, proofs } = parseAlcoholStatements(s || "");
+    const st = statements[0] || null;
+    const proof = proofs[0] ? proofs[0].proof : null;
+    if (!st && proof !== null) return { abv: proof / 2, min: proof / 2, max: proof / 2, proof };
+    if (!st) return { abv: null, proof: null };
+    return { abv: st.min === st.max ? st.min : null, min: st.min, max: st.max, proof, range: !!st.range };
+  }
+
+  const PROOF_TOL = 0.2;   // proof units (= 0.1% ABV), allows for rounding
+
+  function fmtAlc(st) { return st.min === st.max ? `${st.min}%` : `${st.min}–${st.max}%`; }
 
   function checkAlcohol(expected, labelText, beverageType) {
     const field = { label: "Alcohol content", expected: expected || "" };
     const app = parseAlcohol(expected || "");
-    const onLabel = findAlcoholOnLabel(labelText);
-    if (app.abv === null) {
-      if (beverageType === "spirits") return { ...field, status: "fail", found: onLabel[0]?.text || "",
+    const { statements, proofs } = parseAlcoholStatements(labelText);
+    const allText = statements.map((s) => s.text).concat(proofs.map((p) => p.text));
+    const firstFound = allText[0] || "";
+    if (app.min === undefined || app.min === null) {
+      if (beverageType === "spirits") return { ...field, status: "fail", found: firstFound,
         note: "Application has no alcohol content. It is required for distilled spirits." };
-      return { ...field, status: "skip", found: onLabel[0]?.text || "", note: "Not on application — not checked." };
+      return { ...field, status: "skip", found: firstFound, note: "Not on application — not checked." };
     }
+    // proof-only label: treat proof/2 as the statement but ask for a look
+    const onLabel = statements.length ? statements
+      : proofs.map((p) => ({ min: p.proof / 2, max: p.proof / 2, text: p.text, proofOnly: true }));
     if (!onLabel.length) {
       return { ...field, status: "fail", found: "", note: "No alcohol content statement found on the label." };
     }
-    const match = onLabel.find((r) => Math.abs(r.abv - app.abv) < 0.001);
+    const eq = (a, b) => Math.abs(a - b) < 0.001;
+    const match = onLabel.find((s) => eq(s.min, app.min) && eq(s.max, app.max));
+    const appSt = { min: app.min, max: app.max };
     if (!match) {
-      return { ...field, status: "fail", found: onLabel.map((r) => r.text).join(" / "),
-        note: `Label shows ${onLabel[0].abv}% but the application says ${app.abv}%.` };
+      const containing = onLabel.find((s) => s.range && s.min <= app.min && app.max <= s.max);
+      if (containing) return { ...field, status: "review", found: containing.text,
+        note: `Label states a range (${fmtAlc(containing)}); application says ${fmtAlc(appSt)}. Confirm a range is acceptable for this product.` };
+      const close = onLabel.find((s) => !s.range && app.min === app.max && Math.abs(s.min - app.min) <= 0.1 + 1e-9);
+      if (close) return { ...field, status: "review", found: close.text,
+        note: `Label shows ${fmtAlc(close)}, application ${fmtAlc(appSt)} (0.1 apart). Possible misread — check by eye.` };
+      return { ...field, status: "fail", found: allText.join(" / "),
+        note: `Label shows ${fmtAlc(onLabel[0])} but the application says ${fmtAlc(appSt)}.` };
     }
     const issues = [];
-    if (match.proof !== null && Math.abs(match.proof - match.abv * 2) > 0.01) {
-      issues.push(`Proof on label (${match.proof}) is not twice the ABV (${match.abv}%).`);
+    if (!match.range) {
+      for (const p of proofs) {
+        if (Math.abs(p.proof - match.min * 2) > PROOF_TOL) {
+          issues.push(`Proof on label (${p.proof}) is not twice the ABV (${match.min}%).`);
+          break;
+        }
+      }
     }
-    if (app.proof !== null && match.proof !== null && Math.abs(app.proof - match.proof) > 0.01) {
-      issues.push(`Proof on label (${match.proof}) differs from application (${app.proof}).`);
+    if (app.proof !== null && proofs.length && !proofs.some((p) => Math.abs(p.proof - app.proof) <= PROOF_TOL)) {
+      issues.push(`Proof on label (${proofs[0].proof}) differs from application (${app.proof}).`);
     }
-    if (issues.length) return { ...field, status: "fail", found: match.text, note: issues.join(" ") };
+    if (issues.length) return { ...field, status: "fail", found: allText.join(" / "), note: issues.join(" ") };
+    const others = onLabel.filter((s) => !(eq(s.min, match.min) && eq(s.max, match.max)));
+    if (others.length) return { ...field, status: "review", conflict: true, found: allText.join(" / "),
+      note: `The label shows more than one alcohol content (${[match, ...others].map(fmtAlc).join(", ")}). Check which one is printed as the statement.` };
     if (match.proofOnly) return { ...field, status: "review", found: match.text,
       note: "Only a proof statement was found; check the label states alcohol by volume." };
-    return { ...field, status: "pass", found: match.text, note: `${app.abv}% alcohol by volume matches.` };
+    if (match.range) return { ...field, status: "pass", found: match.text, note: `Range ${fmtAlc(match)} matches.` };
+    return { ...field, status: "pass", found: match.text, note: `${match.min}% alcohol by volume matches.` };
+  }
+
+  // Kept for callers/tests that want just the label statements
+  function findAlcoholOnLabel(text) {
+    return parseAlcoholStatements(text).statements.map((s) => ({ abv: s.min, ...s }));
   }
 
   // ---------- net contents ----------
 
-  const UNIT_ML = { ML: 1, CL: 10, L: 1000, LITER: 1000, LITRE: 1000, LITERS: 1000, LITRES: 1000,
-    FLOZ: 29.5735, OZ: 29.5735, PINT: 473.176, PINTS: 473.176, QUART: 946.353, GAL: 3785.41, GALLON: 3785.41 };
+  const UNIT_ML = { ML: 1, CL: 10, DL: 100, L: 1000, LTR: 1000, LITER: 1000, LITRE: 1000,
+    FLOZ: 29.5735, OZ: 29.5735, PINT: 473.176, QUART: 946.353, GAL: 3785.41 };
+  const UNIT_ALIASES = [
+    [/^(ML|MILLILITERS?|MILLILITRES?)$/, "ML"], [/^(CL|CENTILITERS?|CENTILITRES?)$/, "CL"],
+    [/^(DL|DECILITERS?|DECILITRES?)$/, "DL"], [/^(L|LTRS?|LITERS?|LITRES?)$/, "L"],
+    [/^(FLOZ|FLUIDOUNCES?|USFLOZ)$/, "FLOZ"], [/^(OZ|OUNCES?)$/, "OZ"], [/^PINTS?$/, "PINT"],
+    [/^QUARTS?$/, "QUART"], [/^(GAL|GALS|GALLONS?)$/, "GAL"],
+  ];
 
   function parseVolumes(s) {
     const t = cleanQuotes(s).toUpperCase().replace(/\s+/g, " ");
-    const re = /(\d+(?:[.,]\d+)?)\s*(ML|MILLILITERS?|MILLILITRES?|CL|LITERS?|LITRES?|L|FL\.?\s*OZ\.?|OZ\.?|PINTS?|QUART|GAL(?:LON)?S?)(?![A-Z])/g;
+    const re = /(\d{1,3}(?:,\d{3})+|\d+(?:[.,]\d+)?)\s*(MILLILIT(?:ER|RE)S?|CENTILIT(?:ER|RE)S?|DECILIT(?:ER|RE)S?|LIT(?:ER|RE)S?|LTRS?|ML|CL|DL|L|(?:U\.?S\.?\s*)?FL(?:UID)?\.?\s*(?:OZ|OUNCES?)\.?|OZ\.?|OUNCES?|PINTS?|QUARTS?|GAL(?:LON)?S?)(?![A-Z])/g;
     const out = [];
     let m;
     while ((m = re.exec(t))) {
-      let unit = m[2].replace(/[.\s]/g, "");
-      if (unit.startsWith("MILLILIT")) unit = "ML";
-      if (unit === "GALLONS" || unit === "GALS") unit = "GAL";
-      const factor = UNIT_ML[unit];
-      if (!factor) continue;
-      out.push({ ml: parseNumber(m[1]) * factor, text: m[0].trim() });
+      const raw = m[2].replace(/[.\s]/g, "");
+      const alias = UNIT_ALIASES.find(([rx]) => rx.test(raw));
+      const factor = alias && UNIT_ML[alias[1]];
+      const n = parseNumber(m[1]);
+      if (!factor || n === null || n <= 0) continue;
+      out.push({ ml: n * factor, text: m[0].trim() });
     }
     return out;
   }
@@ -304,11 +371,17 @@
     if (!app) return { ...field, status: "fail", found: "", note: "Application value is blank or has no unit (e.g. 750 mL)." };
     const onLabel = parseVolumes(labelText);
     if (!onLabel.length) return { ...field, status: "fail", found: "", note: "No net contents statement found on the label." };
-    const match = onLabel.find((v) => Math.abs(v.ml - app.ml) / app.ml < 0.01);
+    const same = (a, b) => Math.abs(a - b) / Math.max(a, b) < 0.01;
+    const match = onLabel.find((v) => same(v.ml, app.ml));
     if (match) {
-      const same = norm(match.text).replace(/\s/g, "") === norm(expected).replace(/\s/g, "");
-      return { ...field, status: "pass", found: match.text,
-        note: same ? "Exact match." : `Equivalent amount (${Math.round(app.ml)} mL).` };
+      const others = onLabel.filter((v) => !same(v.ml, match.ml));
+      const also = onLabel.filter((v) => v !== match && same(v.ml, match.ml));
+      if (others.length) return { ...field, status: "review", conflict: true, found: onLabel.map((v) => v.text).join(" / "),
+        note: `The label shows different amounts (${onLabel.map((v) => v.text).join(", ")}). Check which is the net contents.` };
+      const exact = norm(match.text).replace(/\s/g, "") === norm(expected).replace(/\s/g, "");
+      let note = exact ? "Exact match." : `Equivalent amount (${Math.round(app.ml)} mL).`;
+      if (also.length) note += ` Also stated as ${also.map((v) => v.text).join(", ")}.`;
+      return { ...field, status: "pass", found: [match, ...also].map((v) => v.text).join(" / "), note };
     }
     return { ...field, status: "fail", found: onLabel.map((v) => v.text).join(" / "),
       note: `Label shows ${onLabel[0].text} (${Math.round(onLabel[0].ml)} mL); application says ${expected}.` };
@@ -351,9 +424,10 @@
 
   /**
    * Checks: heading present, heading in ALL CAPS, wording word-for-word, heading bold.
-   * `bold` is an optional { ratio } from estimateBoldness (pixel analysis done by the app).
+   * `bold` is an optional { ratio } from LabelType.estimateBoldness (pixel analysis), null for typed text.
+   * `typo` optionally carries pixel measurements: { caseShape: { shortFrac }, legibility: { heightRatio, contrast } }.
    */
-  function checkWarning(tokens, bold) {
+  function checkWarning(tokens, bold, typo = {}) {
     const result = { label: "Government health warning", expected: WARNING_FULL, checks: [], diff: [] };
     // Locate heading (fuzzy, two tokens or merged)
     let hStart = -1, hEnd = -1, hScore = 0;
@@ -364,6 +438,12 @@
       const s1 = similarity(one, "GOVERNMENTWARNING");
       if (s2 > hScore) { hScore = s2; hStart = i; hEnd = i + 2; }
       if (s1 > hScore) { hScore = s1; hStart = i; hEnd = i + 1; }
+    }
+    // How many separate warning headings are on the label?
+    let headingCount = 0;
+    for (let i = 0; i < tokens.length; i++) {
+      const two = tokens[i].norm + (tokens[i + 1] ? tokens[i + 1].norm : "");
+      if (similarity(two, "GOVERNMENTWARNING") >= 0.9 || similarity(tokens[i].norm, "GOVERNMENTWARNING") >= 0.9) { headingCount++; i++; }
     }
     if (hScore < 0.75) {
       // Maybe the heading is missing but the body is there
@@ -382,10 +462,18 @@
 
     // ALL CAPS
     const lower = (headLetters.match(/[a-z]/g) || []).length;
-    const capsStatus = lower === 0 ? "pass" : lower <= 1 && headLetters.length > 12 && hScore < 0.95 ? "review" : "fail";
-    result.checks.push({ name: "Heading is in capital letters", status: capsStatus,
-      note: capsStatus === "pass" ? "All capitals." : capsStatus === "review" ? `Read as “${headRaw}”. One letter may be lowercase — check by eye.`
-        : `Heading reads “${headRaw}”. It must be “GOVERNMENT WARNING:” in capital letters.` });
+    let capsStatus = lower === 0 ? "pass" : lower <= 1 && headLetters.length > 12 && hScore < 0.95 ? "review" : "fail";
+    let capsNote = capsStatus === "pass" ? "All capitals." : capsStatus === "review" ? `Read as “${headRaw}”. One letter may be lowercase — check by eye.`
+      : `Heading reads “${headRaw}”. It must be “GOVERNMENT WARNING:” in capital letters.`;
+    // Second opinion from the pixels: in true capitals every letter is about the same height.
+    const shape = typo && typo.caseShape;
+    if (capsStatus === "pass" && shape && isFinite(shape.shortFrac)) {
+      if (shape.shortFrac > 0.3) {
+        capsStatus = "review";
+        capsNote = "Read as capitals, but many letters are shorter than the first one (small capitals or lowercase?). Check by eye.";
+      } else capsNote = "All capitals (letter heights confirmed in the image).";
+    }
+    result.checks.push({ name: "Heading is in capital letters", status: capsStatus, note: capsNote });
 
     // Colon
     const hasColon = /:\s*$/.test(headRaw) || (tokens[hEnd] && /^:/.test(tokens[hEnd].raw));
@@ -436,6 +524,22 @@
     }
     result.checks.push({ name: "Wording is exact", status: wordStatus, note: wordNote });
 
+    if (headingCount > 1) {
+      result.checks.push({ name: "Only one warning statement", status: "review",
+        note: `The label has ${headingCount} government warnings. Check each one is complete and identical.` });
+    }
+
+    // Legibility (pixel measurements): tiny or faint text can be read by OCR but not by a shopper.
+    const leg = typo && typo.legibility;
+    if (leg && isFinite(leg.heightRatio) && isFinite(leg.contrast)) {
+      const tiny = leg.heightRatio < 1 / 100, faint = leg.contrast < 70;
+      result.checks.push({ name: "Warning is clearly legible", status: tiny || faint ? "review" : "pass",
+        note: tiny && faint ? "Warning text is very small and faint compared with the label. Check it is readable."
+          : tiny ? "Warning text is very small compared with the label. Check the type size meets 27 CFR 16.22."
+          : faint ? "Warning text has low contrast with its background. Check it is readable."
+          : "Text size and contrast look normal." });
+    }
+
     // Bold
     if (bold === null) {
       result.checks.push({ name: "Heading is bold", status: "skip", note: "Bold type can't be checked from typed text." });
@@ -455,42 +559,7 @@
     return result;
   }
 
-  /**
-   * Estimate boldness: median horizontal stroke width relative to text height,
-   * heading words vs. body words. Needs a grayscale accessor over the OCR'd image.
-   * gray: Uint8Array (0..255), width: image width; boxes: [{x0,y0,x1,y1}]
-   */
-  function strokeRatio(gray, width, box) {
-    const h = box.y1 - box.y0;
-    if (h < 6 || box.x1 - box.x0 < 6) return null;
-    let min = 255, max = 0;
-    for (let y = box.y0; y < box.y1; y++)
-      for (let x = box.x0; x < box.x1; x++) { const v = gray[y * width + x]; if (v < min) min = v; if (v > max) max = v; }
-    if (max - min < 40) return null;
-    const thr = (min + max) / 2;
-    const runs = [];
-    for (let y = box.y0 + Math.floor(h * 0.25); y < box.y1 - Math.floor(h * 0.2); y++) {
-      let run = 0;
-      for (let x = box.x0; x < box.x1; x++) {
-        if (gray[y * width + x] < thr) run++;
-        else if (run) { runs.push(run); run = 0; }
-      }
-      if (run) runs.push(run);
-    }
-    if (runs.length < 4) return null;
-    runs.sort((a, b) => a - b);
-    return runs[Math.floor(runs.length / 2)] / h;
-  }
-
-  function estimateBoldness(gray, width, headingBoxes, bodyBoxes) {
-    const med = (arr) => { const a = arr.filter((v) => v !== null).sort((x, y) => x - y); return a.length ? a[Math.floor(a.length / 2)] : null; };
-    const head = med(headingBoxes.map((b) => strokeRatio(gray, width, b)));
-    const body = med(bodyBoxes.slice(0, 30).map((b) => strokeRatio(gray, width, b)));
-    if (head === null || body === null) return { ratio: NaN };
-    return { ratio: head / body, head, body };
-  }
-
-  /** Pick heading + body word boxes from OCR word list (needed for estimateBoldness). */
+  /** Pick heading + body word boxes from OCR word list (input for the pixel checks in typography.js). */
   function warningWordBoxes(words) {
     const idx = words.findIndex((w) => /^GOVERN/i.test(w.text.replace(/[^A-Za-z]/g, "")) || similarity(normToken(w.text), "GOVERNMENT") > 0.75);
     if (idx < 0) return null;
@@ -498,49 +567,103 @@
     if (words[idx + 1] && similarity(normToken(words[idx + 1].text), "WARNING") > 0.6) heading.push(words[idx + 1].bbox);
     const body = words.slice(idx + heading.length, idx + heading.length + 40)
       .filter((w) => /^[a-z]{3,}$/.test(w.text.replace(/[^A-Za-z]/g, "")) && w.confidence > 60).map((w) => w.bbox);
-    return { heading, body };
+    // every word of the statement, faint ones included (for size/contrast)
+    const all = words.slice(idx, idx + heading.length + 45).filter((w) => w.text.replace(/[^A-Za-z]/g, "").length >= 2).map((w) => w.bbox);
+    return { heading, body, all };
+  }
+
+  // ---------- label integrity ----------
+
+  // Text that reads like instructions to a machine. This app has no AI model to hijack,
+  // but such text has no business on a label and is a sign someone is probing the system.
+  const INSTRUCTION_PATTERNS = [
+    /\b(IGNORE|DISREGARD)\b.{0,30}\b(PREVIOUS|ABOVE|PRIOR|INSTRUCTIONS?|RULES?)\b/i,
+    /\bOVERRIDE\b/i, /\bSYSTEM\s*(PROMPT|MESSAGE)\b/i, /\bPROMPT\b/i,
+    /\b(IS_BOLD|IS_ALL_CAPS|GOVERNMENT_WARNING_TEXT|VERDICT|STATUS)\s*["']?\s*:/i,
+    /\{\s*["'][A-Za-z_]+["']\s*:/, /\bRETURN\s*\{/i, /<\/?(script|system|instruction)/i,
+  ];
+
+  function checkIntegrity(text) {
+    const field = { label: "Label integrity", expected: "No instructions, code or hidden text" };
+    const flat = cleanQuotes(text).replace(/\s+/g, " ");
+    const hits = [];
+    for (const rx of INSTRUCTION_PATTERNS) {
+      const m = flat.match(rx);
+      if (m) hits.push(m[0]);
+    }
+    if (hits.length) {
+      return { ...field, status: "review", found: hits.slice(0, 3).join(" · "),
+        note: "The label contains text that looks like computer instructions or code. It does not change any result, but the artwork should be examined." };
+    }
+    return { ...field, status: "pass", found: "", note: "No instruction-like or code-like text found." };
   }
 
   // ---------- top level ----------
 
-  /**
-   * app: { beverageType, brandName, classType, alcoholContent, netContents, bottler, countryOfOrigin }
-   * ocr: { text, bold? }
-   */
-  function verifyLabel(app, ocr) {
-    const text = ocr.text || "";
-    const tokens = tokenize(text);
-    const bt = app.beverageType || "spirits";
-    const fields = [
-      { key: "brandName", ...checkText("Brand name", app.brandName, tokens) },
-      { key: "classType", ...checkText("Class / type", app.classType, tokens) },
-      { key: "alcoholContent", ...checkAlcohol(app.alcoholContent, text, bt) },
-      { key: "netContents", ...checkNetContents(app.netContents, text) },
-      { key: "bottler", ...checkNameAddress(app.bottler, tokens) },
-      { key: "countryOfOrigin", ...checkText("Country of origin", app.countryOfOrigin, tokens, { optional: true }) },
-      { key: "warning", ...checkWarning(tokens, ocr.bold) },
-    ];
+  /** Run one check; an unexpected error becomes "Check by eye" instead of breaking the whole result. */
+  function safe(key, label, fn) {
+    try {
+      return { key, ...fn() };
+    } catch (e) {
+      return { key, label, expected: "", found: "", status: "review",
+        note: "This item could not be checked automatically. Check it by eye.", error: String(e && e.message || e) };
+    }
+  }
+
+  function summarize(fields, tokenCount) {
     const counts = { pass: 0, review: 0, fail: 0, skip: 0 };
     fields.forEach((f) => counts[f.status]++);
     const verdict = counts.fail ? "fail" : counts.review ? "review" : "pass";
-    return { verdict, counts, fields, tokenCount: tokens.length };
+    return { verdict, counts, fields, tokenCount };
   }
 
   /**
-   * Combine two reads of the same label (original + cleaned-up image):
-   * for each field keep whichever read gave the better result.
+   * app: { beverageType, brandName, classType, alcoholContent, netContents, bottler, countryOfOrigin }
+   * ocr: { text, bold?, caseShape?, legibility? }   (bold === null means typed text)
+   */
+  function verifyLabel(app, ocr) {
+    const text = String((ocr && ocr.text) || "");
+    const tokens = tokenize(text);
+    app = app || {};
+    const bt = app.beverageType || "spirits";
+    const typo = { caseShape: ocr && ocr.caseShape, legibility: ocr && ocr.legibility };
+    const fields = [
+      safe("brandName", "Brand name", () => checkText("Brand name", app.brandName, tokens)),
+      safe("classType", "Class / type", () => checkText("Class / type", app.classType, tokens)),
+      safe("alcoholContent", "Alcohol content", () => checkAlcohol(app.alcoholContent, text, bt)),
+      safe("netContents", "Net contents", () => checkNetContents(app.netContents, text)),
+      safe("bottler", "Bottler / producer name & address", () => checkNameAddress(app.bottler, tokens)),
+      safe("countryOfOrigin", "Country of origin", () => checkText("Country of origin", app.countryOfOrigin, tokens, { optional: true })),
+      safe("warning", "Government health warning", () => checkWarning(tokens, ocr ? ocr.bold : undefined, typo)),
+      safe("integrity", "Label integrity", () => checkIntegrity(text)),
+    ];
+    return summarize(fields, tokens.length);
+  }
+
+  /**
+   * Combine two reads of the same label (original + cleaned-up image).
+   * For each field keep the better read, with two safeguards against crafted images:
+   * - a field that failed on the original and passes only after clean-up becomes "Check":
+   *   clean-up boosts contrast, which can surface faint text a person would not see;
+   * - label integrity keeps the worse of the two reads, so hidden text found in either counts;
+   * - a conflicting second value (e.g. a faint "45%" on a 40% label) found in either read is kept.
    */
   function mergeResults(a, b) {
     if (!b) return a;
     const rank = { pass: 3, skip: 3, review: 2, fail: 1 };
     const fields = a.fields.map((fa, i) => {
       const fb = b.fields[i];
-      return rank[fb.status] > rank[fa.status] ? { ...fb, fromCleanup: true } : fa;
+      if (fa.key === "integrity") return rank[fb.status] < rank[fa.status] ? { ...fb, fromCleanup: true } : fa;
+      // A second, conflicting value seen only in the enhanced image may be faint hidden text: surface it.
+      if (fb.conflict && !fa.conflict) return { ...fb, fromCleanup: true, note: fb.note + " One of them only showed up after image enhancement (faint text?)." };
+      if (rank[fb.status] <= rank[fa.status]) return fa;
+      if (fa.status === "fail" && fb.status === "pass") {
+        return { ...fb, status: "review", fromCleanup: true,
+          note: fb.note + " Only readable after image enhancement — confirm it is visible on the label." };
+      }
+      return { ...fb, fromCleanup: true };
     });
-    const counts = { pass: 0, review: 0, fail: 0, skip: 0 };
-    fields.forEach((f) => counts[f.status]++);
-    const verdict = counts.fail ? "fail" : counts.review ? "review" : "pass";
-    return { verdict, counts, fields, tokenCount: Math.max(a.tokenCount, b.tokenCount) };
+    return summarize(fields, Math.max(a.tokenCount, b.tokenCount));
   }
 
   // ---------- CSV (batch) ----------
@@ -599,7 +722,7 @@
     WARNING_HEADING, WARNING_BODY, WARNING_FULL,
     norm, tokenize, similarity, levenshtein, bestWindow,
     checkText, checkNameAddress, checkAlcohol, checkNetContents, checkWarning,
-    parseAlcohol, findAlcoholOnLabel, parseVolumes, alignWords,
-    estimateBoldness, warningWordBoxes, verifyLabel, mergeResults, parseCSV, toCSV,
+    parseAlcohol, parseAlcoholStatements, findAlcoholOnLabel, parseVolumes, alignWords, cleanQuotes,
+    warningWordBoxes, checkIntegrity, verifyLabel, mergeResults, parseCSV, toCSV,
   };
 });
