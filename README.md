@@ -1,4 +1,5 @@
 # Alcohol Label Verifier
+   **Live demo:** https://purush001.github.io/alcohol-label-verifier/
 
 A prototype that checks an alcohol beverage label image against the data in its label application — the routine "does the label match the form" part of COLA review — so compliance agents can spend their time on the judgment calls.
 
