@@ -1,5 +1,6 @@
 # Alcohol Label Verifier
    **Live demo:** https://purush001.github.io/alcohol-label-verifier/
+
 A prototype that checks an alcohol beverage label image against the data in its label application — the routine "does the label match the form" part of COLA review — so compliance agents can spend their time on the judgment calls.
 
 An agent drops in a label image, types (or pastes) the application values, and presses **Check label**. In about 1–3 seconds the tool shows each item as **Matches**, **Check** (look by eye) or **Doesn't match**, with what the application says next to what was read from the label. Batches of hundreds of labels can be checked from one CSV.
